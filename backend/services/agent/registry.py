@@ -8,10 +8,11 @@
 模型侧只看到 tool_schemas() 输出的说明书；执行侧只调 call_tool()。
 新增工具 = 写一个函数 + 一个 Args 模型 + 注册一行。
 """
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+import re
 
 from .tools import read_log, search_code, git_log, git_show
-
 
 # ---------- 参数模型：描述就是给模型看的工具说明 ----------
 
@@ -19,46 +20,100 @@ class ReadLogArgs(BaseModel):
     """read_log 的入参：按服务/时间窗/关键词过滤日志。"""
     service: str = Field(
         default="",
-        description="服务名，对应日志文件名（如 order-service）。留空则搜索全部日志",
+        description=(
+            "目标服务名，对应日志文件名（如 'order-service' 对应 order-service.log）。"
+            "【重要限制】一旦填入就只搜索这一个文件，其他日志完全不搜索；"
+            "只有用户明确指定日志所属服务时才填，故障发生在某个接口不等于日志只在该文件中。"
+            "无法确定、需要全局排查或未找到证据时，留空搜索全部日志文件。"
+        )
     )
     keywords: list[str] = Field(
         default_factory=list,
-        description="日志检索关键词，输出日志里可能出现的英文术语/错误片段（如 timeout、total=、ERROR）。留空返回时间窗内全部行",
+        description=(
+            "日志关键词（如 timeout、total=、ERROR），采用不区分大小写的子串匹配，不支持正则。"
+            "多个关键词之间是 OR 关系，无需同时出现；按命中的不同关键词数选择最佳文件。"
+            "建议传 1 至 4 个核心英文术语或错误片段。留空返回时间窗内全部行。"
+        )
     )
     start: str = Field(
         default="",
-        description="时间窗起点，如 '15:00' 或 '2026-11-08 15:00:11'。留空不限",
+        description="时间窗起点，如 '15:00' 或 '2026-11-08 15:00:11'。留空不限，没有时间戳的行不会被过滤掉",
     )
     end: str = Field(
         default="",
-        description="时间窗终点，格式同 start。留空不限",
+        description="时间窗终点，格式同 start。留空不限，没有时间戳的行不会被过滤掉",
     )
     max_lines: int = Field(
         default=50,
-        description="最多返回多少行，防止超长输出爆上下文",
+        description=(
+            "单次最多返回的行数限制（默认 50 行），用于防止超长输出爆上下文。"
+            "【防截断机制】若返回结果带有截断提示且未看全，可适当调大此值；"
+            "若内容过于冗杂，应考虑收窄检索范围或更换精准工具，切勿盲目无限放大。"
+        )
     )
 
 
 class SearchCodeArgs(BaseModel):
     """search_code 的入参：在服务源码里搜字符串。"""
     query: str = Field(
-        description="搜索词：函数名、变量名、常量名或代码片段（如 POOL_MAX、dec_stock、while True）",
+        description=(
+            "代码搜索词：支持函数名、变量名、常量名或核心代码片段（如 POOL_MAX、dec_stock、timeout）。"
+            "【匹配规则】采用纯子串匹配（不支持正则表达式），不区分大小写。"
+            "【排查建议】若首次搜索无结果，切勿盲目加长表达式，应主动**缩短或精简关键词**（例如将复杂的长函数名拆为核心名词或动作词）后再次尝试。"
+        )
     )
     max_lines: int = Field(
         default=30,
-        description="最多返回多少行片段",
+        description=(
+            "单次最多返回的代码行数（默认 30 行）。"
+            "若结果带有 '已截断' 标记且关键代码未看全，可适当调大；"
+            "若结果噪音太大，应精简 query 缩小搜索范围，不要盲目放大此参数。"
+        )
     )
 
 
 class GitLogArgs(BaseModel):
     """git_log 的入参：看最近提交历史。"""
-    max_count: int = Field(default=10, description="最多看几条提交，默认 10")
-
+    max_count: int = Field(
+        default=10,
+        description=(
+            "最多查看的提交历史条数限制（默认 10 条，上限为 30 条）。"
+            "【防超载机制】用于控制 git_log 的返回广度，即使传入大于 30 的值也强制截断为 30 条。"
+            "若 10 条内未找到语义相关的嫌疑提交，可适当调大此值；若 30 条全看完了仍无头绪，说明故障与近期代码变更无关，应立刻切换至日志或代码搜索工具。"
+        )
+    )
 
 class GitShowArgs(BaseModel):
-    """git_show 的入参：看某次提交的具体改动。"""
-    commit: str = Field(description="commit hash，如 783f100（可从 git_log 结果获取）")
-    max_lines: int = Field(default=80, description="最多返回多少行 diff")
+    """git_show 的入参：看某次提交的具体改动与元信息。"""
+
+    commit: str = Field(
+        description=(
+            "目标 commit 的 hash 值（必须是 4 到 40 位的十六进制字符串，如 783f100），"
+            "【严禁事项】绝不支持 HEAD~1、分支名或相对路径等写法，必须从 git_log 的返回结果中获取真实 hash。"
+            "【核心原则】切忌盲目只看 git_log 的第一条！当某条历史提交的 Message 与故障现象语义相关时，"
+            "必须传入该条提交的 hash 来查看其具体的改动明细。"
+        )
+    )
+
+    max_lines: int = Field(
+        default=80,
+        description=(
+            "单次最多返回的 diff 代码行数限制（默认 80 行）。"
+            "【防截断机制】若返回结果包含 '已截断' 提示且关键改动未看全，可适当调大此值；"
+            "若单次改动范围过大导致噪音淹没核心逻辑，建议结合 git_log 寻找更小的单点提交，切勿盲目无限放大此参数。"
+        )
+    )
+
+    @field_validator("commit")
+    @classmethod
+    def validate_commit_hash(cls, v: str) -> str:
+        # 校验是否为 4~40 位的十六进制字符
+        if not re.fullmatch(r"^[0-9a-fA-F]{4,40}$", v):
+            raise ValueError(
+                f"非法的 commit 格式: '{v}'。"
+                "git_show 仅接受 4~40 位十六进制 commit hash（严禁使用 HEAD~1 等相对写法），请先通过 git_log 获取合法的 hash。"
+            )
+        return v
 
 
 # ---------- 注册表 ----------
@@ -67,22 +122,46 @@ TOOL_REGISTRY: dict[str, dict] = {
     "read_log": {
         "func": read_log,
         "args_model": ReadLogArgs,
-        "description": "按服务名/时间窗/关键词过滤日志，返回命中片段（含来源文件标注）。排查日志证据用",
+        "description": (
+            "按服务名、时间窗和关键词过滤业务日志，返回命中片段及来源文件标注。"
+            "【输出限制】每次仅返回命中不同关键词数量最多的 1 个日志文件，避免上下文过载。"
+            "【未命中或无有效证据时的排查调整策略】请按以下顺序换方式再查："
+            "1) 放宽范围：若指定了 service，将其置空改为全局跨服务搜索；"
+            "2) 精简/替换关键词：因底层采用不区分大小写的纯子串 OR 匹配（不支持正则），切勿堆砌长词，应缩短或精简为 1~2 个更通用的英文错误词（如 ERROR、timeout、fail）；"
+            "3) 扩大时间窗：放宽 start 或 end 时间限制；"
+            "4) 切换工具：若上述调整后仍无果，停止死磕日志，转而调用代码检索或 Git 变更工具（git_log）排查。"
+        )
     },
     "search_code": {
         "func": search_code,
         "args_model": SearchCodeArgs,
-        "description": "在服务源码中搜索字符串，返回 文件:行号 + 上下文片段。定位代码证据/根因位置用",
+        "description": (
+            "在服务源码的 src/ 目录下搜索指定的字符串或代码片段（仅匹配 .py 文件），"
+            "返回 '文件:行号 + 上下文片段' 样式的真实输出。"
+            "【使用时机】当你通过日志或 Git 提交历史锁定了可疑模块，需要定位具体代码根因时使用。"
+            "【未命中降级策略】若未搜索到目标代码：1) 检查关键词是否拼写过细或带了动态变量；"
+            "2) 尝试精简或拆分搜索词（如将长函数名拆为核心关键字）；"
+            "3) 若代码中确实没有，请转而检查配置文件或通过 git_log 排查近期变更。"
+        )
     },
     "git_log": {
         "func": git_log,
         "args_model": GitLogArgs,
-        "description": "查看靶场仓库最近的提交历史（hash + 提交信息）。当日志/代码无法解释故障、怀疑是最近变更引入时用",
+        "description": (
+            "查看靶场仓库最近的提交历史（返回 hash + 提交信息）。"
+            "【触发时机】当日志与源码检索无法解释故障、怀疑是最近代码变更引入时使用。"
+            "【后续与筛选策略】获取历史后，切忌只看最显眼的第一条；应仔细比对 Commit Message，若发现与故障现象高度相关的提交（如涉及重构、配置或底层调整），下一步必须立即调用 git_show 查看其详细改动明细。"
+        )
     },
     "git_show": {
         "func": git_show,
         "args_model": GitShowArgs,
-        "description": "查看某次提交的完整 diff。用 git_log 找到可疑提交后，用它确认具体改了哪行",
+        "description": (
+            "查看某次提交的完整 diff（代码变更明细）。"
+            "【使用时机】必须在通过 git_log 拿到提交历史后配合使用。"
+            "【核心原则】切忌盲目只看最显眼的第一条提交！当某条提交的 Message（如涉及重构、配置调整或底层逻辑变更）与当前故障现象在语义上相关时，"
+            "必须立即调用此工具查看其具体的改动行，锁定嫌疑代码。"
+        )
     },
 }
 

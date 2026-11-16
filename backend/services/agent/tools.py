@@ -11,7 +11,30 @@ LOG_DIR = LAB_DIR / "logs"
 CODE_DIR = LAB_DIR / "order-service" / "src"   # 靶场服务源码
 
 MAX_LINES = 50       # 输出截断：日志可能几千行，全塞给模型会爆上下文
+MAX_CHARS = 4000     # 字符数兜底：行数没超但单行超长（如整段 JSON）时生效
 CONTEXT_LINES = 2    # 命中行前后带几行上下文
+
+
+def _truncate(lines: list[str], max_lines: int) -> str:
+    """统一截断：行数 + 字符数双上限。所有给模型的返回都走这里，格式一致。"""
+    text = "\n".join(lines[:max_lines])
+    if len(lines) > max_lines:
+        text += f"\n... [已截断，共 {len(lines)} 行，只显示前 {max_lines} 行]"
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS] + f"\n... [已截断，共 {len(text)} 字符，只显示前 {MAX_CHARS} 字符]"
+    return text
+
+
+def _meta(name: str, score: int, kw_count: int, start: str, end: str, total: int) -> str:
+    """统一的结果头部：来源 + 可选时间窗 + 命中情况。read_log / grep_logs 共用。"""
+    parts = [f"来源: {name}"]
+    if start or end:
+        parts.append(f"时间窗: {start or '-∞'}~{end or '+∞'}")
+    if kw_count:
+        parts.append(f"命中关键词 {score}/{kw_count}")
+    elif total:
+        parts.append(f"共 {total} 行")
+    return "[" + " | ".join(parts) + "]"
 
 
 def _search(lines: list[str], kw: list[str], max_lines: int) -> tuple[str, int] | None:
@@ -32,10 +55,7 @@ def _search(lines: list[str], kw: list[str], max_lines: int) -> tuple[str, int] 
     if not hit:
         return None
     ordered = sorted(hit)
-    out = [lines[i] for i in ordered[:max_lines]]
-    if len(ordered) > max_lines:
-        out.append(f"... [已截断，共 {len(ordered)} 行命中，只显示前 {max_lines} 行]")
-    return "\n".join(out), len(matched)
+    return _truncate([lines[i] for i in ordered], max_lines), len(matched)
 
 
 def grep_logs(service: str, keywords: list[str], max_lines: int = MAX_LINES) -> str:
@@ -65,7 +85,7 @@ def grep_logs(service: str, keywords: list[str], max_lines: int = MAX_LINES) -> 
         snippet, score = result
         is_primary = 1 if i == 0 else 0
         if best is None or (score, is_primary) > (best[1], best[2]):
-            best = (f"[来源: {path.name} | 命中关键词 {score}/{len(kw)}]\n{snippet}", score, is_primary)
+            best = (f"{_meta(path.name, score, len(kw), '', '', 0)}\n{snippet}", score, is_primary)
 
     if best is None:
         return f"[日志中未命中关键词: {', '.join(keywords)}]"
@@ -102,6 +122,7 @@ def read_log(service: str = "",
     """按 服务 → 时间窗 → 关键词 三层过滤读取日志。
 
     返回：命中片段（标注来源/时间窗/命中数），给模型做证据。
+    跨文件搜索时附带其他命中文件列表——模型才知道还有哪些日志可查。
     所有参数可缺省：service 空 = 全目录搜索，keywords 空 = 时间窗内全部行。
     """
     # ① 服务过滤：选候选文件
@@ -116,7 +137,7 @@ def read_log(service: str = "",
         return f"[无日志文件] {LOG_DIR}"
 
     kw = [k.lower() for k in keywords]
-    best: tuple[str, int, int] | None = None  # (片段, 分数, 是否主文件)
+    scored: list[dict] = []   # 每个文件的命中：name / score / primary / text
 
     for i, path in enumerate(files):
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -135,24 +156,33 @@ def read_log(service: str = "",
                 continue
             snippet, score = result
         else:
-            snippet, score = "\n".join(lines[:max_lines]), 0
-            if len(lines) > max_lines:
-                snippet += f"\n... [已截断，共 {len(lines)} 行]"
+            snippet, score = _truncate(lines, max_lines), 0
 
-        is_primary = 1 if i == 0 else 0
-        if best is None or (score, is_primary) > (best[1], best[2]):
-            meta = f"[来源: {path.name}"
-            if start or end:
-                meta += f" | 时间窗: {start or '-∞'}~{end or '+∞'}"
-            meta += f" | 命中关键词 {score}/{len(kw)}" if kw else f" | 共 {total} 行"
-            meta += "]"
-            best = (f"{meta}\n{snippet}", score, is_primary)
+        scored.append({
+            "name": path.name,
+            "score": score,
+            "primary": 1 if i == 0 else 0,
+            "text": f"{_meta(path.name, score, len(kw), start, end, total)}\n{snippet}",
+        })
 
-    if best is None:
+    if not scored:
         if kw:
             return f"[未命中] 关键词 {keywords} 在指定范围内无结果，可换关键词或扩大时间窗"
         return f"[无日志] 时间窗 {start}~{end} 内无日志行"
-    return best[0]
+
+    best_i = max(range(len(scored)), key=lambda i: (scored[i]["score"], scored[i]["primary"]))
+    out = scored[best_i]["text"]
+
+    # 跨文件搜索时列出其他命中文件（按得分排序），模型可据此换查
+    if kw and len(files) > 1:
+        others = sorted(
+            (r for i, r in enumerate(scored) if i != best_i and r["score"] > 0),
+            key=lambda r: -r["score"],
+        )
+        if others:
+            names = ", ".join(f"{r['name']} ({r['score']}/{len(kw)})" for r in others)
+            out += f"\n[其他命中文件: {names}]"
+    return out
 
 CODE_CONTEXT_LINES = 3  # 代码命中行前后各带 3 行（比日志多，代码要上下文才能看懂）
 
@@ -202,9 +232,7 @@ def search_code(query: str, max_lines: int = 30) -> str:
         return f"[代码中未命中: {query}] 可尝试更短的关键词或搜函数名/变量名"
 
     body = "\n\n".join(hits)
-    out_lines = body.splitlines()
-    if len(out_lines) > max_lines:
-        body = "\n".join(out_lines[:max_lines]) + f"\n... [已截断，共 {len(out_lines)} 行]"
+    body = _truncate(body.splitlines(), max_lines)
     return f"[代码搜索: {query} | {hit_count} 处命中]\n{body}"
 
 
@@ -250,7 +278,5 @@ def git_show(commit: str, max_lines: int = 80) -> str:
     diff = _git(["show", "--format=%h %s%n%b", commit])
     if diff.startswith("[错误]"):
         return diff
-    lines = diff.splitlines()
-    if len(lines) > max_lines:
-        diff = "\n".join(lines[:max_lines]) + f"\n... [已截断，共 {len(lines)} 行]"
-    return f"[git show {commit}]\n{out}\n{diff}"
+    diff = _truncate(diff.splitlines(), max_lines)
+    return f"[git show {commit}]\n{out}\n\n{diff}"

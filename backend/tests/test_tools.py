@@ -103,6 +103,20 @@ class TestReadLog:
         out = tools.read_log(service="missing", keywords=["x"], start="99:99")
         assert isinstance(out, str)
 
+    def test_cross_file_lists_other_candidates(self, tmp_path, monkeypatch):
+        d = tmp_path / "logs"
+        d.mkdir()
+        (d / "a.log").write_text("timeout error\n", encoding="utf-8")
+        (d / "b.log").write_text("timeout\n", encoding="utf-8")
+        monkeypatch.setattr(tools, "LOG_DIR", d)
+        out = tools.read_log(keywords=["timeout"])
+        assert out.startswith("[来源: a.log")
+        assert "[其他命中文件: b.log (1/1)]" in out
+
+    def test_no_other_files_when_service_pinned(self, log_dir):
+        out = tools.read_log(service="order-service", keywords=["timeout"])
+        assert "其他命中文件" not in out
+
 
 class TestSearchCode:
     def test_hit_format_file_line(self, code_dir):
