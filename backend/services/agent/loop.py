@@ -1,4 +1,5 @@
 import json
+import asyncio
 from typing import AsyncIterator
 
 from services.llm.client import client, provider
@@ -68,23 +69,60 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
         if msg.tool_calls and thought:
             yield {"type": "thought", "text": thought}
 
-        # 有 tool_calls → 先记"模型要调工具"，再逐个执行回填
-        messages.append(msg)
+        # -------------------------------------------------------------
+        # 阶段 1：串行准备——发事件、去重、解析参数、构造并发任务
+        # 去重必须在这里完成：等结果回来再标记，同轮的重复调用就都执行了
+        # -------------------------------------------------------------
+        messages.append(msg)   # 模型原话回填；协议要求每个 tool_call 后跟一条 tool 消息
+        prep: list[dict] = []  # 每个 tc 一项：execute 带 coro，shortcut 带预计算 result
         for tc in msg.tool_calls:
-            sig = f"{tc.function.name}:{tc.function.arguments}"
+            # 先把所有 tool_call 事件发出去：前端时间线上它们会同时进入"执行中"
             yield {"type": "tool_call", "name": tc.function.name,
                    "args": tc.function.arguments, "id": tc.id}
 
-            # 检测重复调用
+            sig = f"{tc.function.name}:{tc.function.arguments}"
             if sig in seen:
-                result = "[提示] 该工具已用相同参数调用过，请换策略或直接给结论"
-            else:
-                seen.add(sig)
-                try:
-                    args = json.loads(tc.function.arguments)
-                    result = call_tool(tc.function.name, args)
-                except json.JSONDecodeError:
-                    result = f"[错误] 工具参数不是合法 JSON: {tc.function.arguments}"
+                # 重复调用：不执行、不发协程，直接给模型提示
+                # continue 必不可少——否则会落入下方执行分支，同一个 id 回填两条结果
+                prep.append({"tc": tc,
+                             "result": "[提示] 该工具已用相同参数调用过，请换策略或直接给结论"})
+                continue
+            seen.add(sig)
+
+            try:
+                args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                prep.append({"tc": tc,
+                             "result": f"[错误] 工具参数不是合法 JSON: {tc.function.arguments}"})
+                continue
+
+            # call_tool 是同步函数，直接 gather 会阻塞事件循环变成串行——
+            # 必须丢进线程池（asyncio.to_thread）才是真并发
+            prep.append({"tc": tc, "coro": asyncio.to_thread(call_tool, tc.function.name, args)})
+
+        # -------------------------------------------------------------
+        # 阶段 2：并发执行
+        # return_exceptions=True：单个失败作为返回值回来，不炸整批（"单个失败不影响其他"）
+        # gather 的返回顺序 = 传入顺序，不是完成顺序——正好满足按 tool_calls 原序回填
+        # -------------------------------------------------------------
+        results = await asyncio.gather(*(p["coro"] for p in prep if "coro" in p),
+                                       return_exceptions=True)
+        it = iter(results)
+        for p in prep:
+            if "coro" not in p:
+                continue
+            r = next(it)
+            # 异常转成 observation 字符串喂回模型，而不是中断循环（与 call_tool 同一哲学）
+            p["result"] = f"[错误] 工具执行异常: {r}" if isinstance(r, BaseException) else r
+
+        # -------------------------------------------------------------
+        # 阶段 3：按 tool_calls 原顺序收尾
+        # 注意：这段必须留在 for step 循环内（缩进一层）——挪出去会导致
+        # tool 消息没回填，下一轮 LLM 请求因 tool_calls 悬空直接 400
+        # -------------------------------------------------------------
+        for p in prep:
+            tc = p["tc"]
+            result = p["result"]
 
             # 连续失败计数：错误也是 Observation，但失败多次要提示模型换思路
             if result.startswith("[错误]"):
@@ -94,12 +132,13 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
             else:
                 fail_count[tc.function.name] = 0
 
+            # 两份内容有意不同：前端事件截断 2000 防爆屏；
+            # 回填给模型的用完整结果（工具层 _truncate 已有 4000 字符兜底）
             yield {"type": "tool_result", "name": tc.function.name,
-                   "result": result[:2000], "id": tc.id}   # 截断保护，防单次结果爆上下文
-
+                   "result": result[:2000], "id": tc.id}
             messages.append({
                 "role": "tool",
-                "tool_call_id": tc.id,
+                "tool_call_id": tc.id,   # 模型靠这个 id 把结果和调用配对
                 "content": result,
             })
         # 回到循环顶部：模型看到工具结果，再决定下一步
