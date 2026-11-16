@@ -1,5 +1,5 @@
-import json
 import asyncio
+import json
 from typing import AsyncIterator
 
 from services.llm.client import client, provider
@@ -23,16 +23,21 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
       content     最终答案（模型不再调工具）
       error       异常
     """
-    messages = [{"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": question}]
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
     fail_count: dict[str, int] = {}   # 工具失败次数统计
-    seen: set[str] = set() # 检测重复调用
+    seen: set[str] = set()  # 检测重复调用
     total_tokens = 0
     TOKEN_BUDGET = 30000      # 单次请求预算
 
     for step in range(max_steps):          # 步数上限：防止死循环/烧钱
-        yield {"type": "step", "name": f"round_{step + 1}",
-               "label": f"第 {step + 1} 轮思考"}
+        yield {
+            "type": "step",
+            "name": f"round_{step + 1}",
+            "label": f"第 {step + 1} 轮思考",
+        }
         try:
             resp = await client.chat.completions.create(
                 model=provider.model,
@@ -42,18 +47,26 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
             )
             total_tokens += resp.usage.total_tokens if resp.usage else 0  # 每轮累计真实消耗
             if total_tokens > TOKEN_BUDGET:
-                messages.append({"role": "system",
-                                 "content": "Token 使用已超过预算，请基于已有信息直接给结论，不要再调工具"})
+                messages.append({
+                    "role": "system",
+                    "content": "Token 使用已超过预算，请基于已有信息直接给结论，不要再调工具",
+                })
                 # 不带 tools 的最后一次调用：强制模型收尾而不是继续调工具
                 resp = await client.chat.completions.create(
                     model=provider.model, messages=messages, temperature=0.3)
-                yield {"type": "content",
-                       "text": f"[已达 token 预算 {TOKEN_BUDGET}]\n\n" + (resp.choices[0].message.content or "")}
+                yield {
+                    "type": "content",
+                    "text": f"[已达 token 预算 {TOKEN_BUDGET}]\n\n" + (resp.choices[0].message.content or ""),
+                }
                 return
-            
+
         except Exception as e:
-            yield {"type": "error", "code": "llm_call_failed",
-                   "message": str(e), "retryable": step + 1 < max_steps}
+            yield {
+                "type": "error",
+                "code": "llm_call_failed",
+                "message": str(e),
+                "retryable": step + 1 < max_steps,
+            }
             return
 
         msg = resp.choices[0].message
@@ -77,23 +90,31 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
         prep: list[dict] = []  # 每个 tc 一项：execute 带 coro，shortcut 带预计算 result
         for tc in msg.tool_calls:
             # 先把所有 tool_call 事件发出去：前端时间线上它们会同时进入"执行中"
-            yield {"type": "tool_call", "name": tc.function.name,
-                   "args": tc.function.arguments, "id": tc.id}
+            yield {
+                "type": "tool_call",
+                "name": tc.function.name,
+                "args": tc.function.arguments,
+                "id": tc.id,
+            }
 
             sig = f"{tc.function.name}:{tc.function.arguments}"
             if sig in seen:
                 # 重复调用：不执行、不发协程，直接给模型提示
                 # continue 必不可少——否则会落入下方执行分支，同一个 id 回填两条结果
-                prep.append({"tc": tc,
-                             "result": "[提示] 该工具已用相同参数调用过，请换策略或直接给结论"})
+                prep.append({
+                    "tc": tc,
+                    "result": "[提示] 该工具已用相同参数调用过，请换策略或直接给结论",
+                })
                 continue
             seen.add(sig)
 
             try:
                 args = json.loads(tc.function.arguments)
             except json.JSONDecodeError:
-                prep.append({"tc": tc,
-                             "result": f"[错误] 工具参数不是合法 JSON: {tc.function.arguments}"})
+                prep.append({
+                    "tc": tc,
+                    "result": f"[错误] 工具参数不是合法 JSON: {tc.function.arguments}",
+                })
                 continue
 
             # call_tool 是同步函数，直接 gather 会阻塞事件循环变成串行——
@@ -105,8 +126,10 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
         # return_exceptions=True：单个失败作为返回值回来，不炸整批（"单个失败不影响其他"）
         # gather 的返回顺序 = 传入顺序，不是完成顺序——正好满足按 tool_calls 原序回填
         # -------------------------------------------------------------
-        results = await asyncio.gather(*(p["coro"] for p in prep if "coro" in p),
-                                       return_exceptions=True)
+        results = await asyncio.gather(
+            *(p["coro"] for p in prep if "coro" in p),
+            return_exceptions=True,
+        )
         it = iter(results)
         for p in prep:
             if "coro" not in p:
@@ -134,8 +157,12 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
 
             # 两份内容有意不同：前端事件截断 2000 防爆屏；
             # 回填给模型的用完整结果（工具层 _truncate 已有 4000 字符兜底）
-            yield {"type": "tool_result", "name": tc.function.name,
-                   "result": result[:2000], "id": tc.id}
+            yield {
+                "type": "tool_result",
+                "name": tc.function.name,
+                "result": result[:2000],
+                "id": tc.id,
+            }
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,   # 模型靠这个 id 把结果和调用配对
@@ -143,5 +170,9 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
             })
         # 回到循环顶部：模型看到工具结果，再决定下一步
 
-    yield {"type": "error", "code": "max_steps",
-           "message": f"达到最大步数 {max_steps}，请人工介入", "retryable": False}
+    yield {
+        "type": "error",
+        "code": "max_steps",
+        "message": f"达到最大步数 {max_steps}，请人工介入",
+        "retryable": False,
+    }
