@@ -3,6 +3,8 @@ import json
 from typing import AsyncIterator
 
 from services.llm.client import client, provider
+from services.mcp import manager as mcp_manager
+from services.mcp.schema import MCP_PREFIX
 from .registry import tool_schemas, call_tool
 
 SYSTEM_PROMPT = (
@@ -42,7 +44,8 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
             resp = await client.chat.completions.create(
                 model=provider.model,
                 messages=messages,
-                tools=tool_schemas(),
+                # 本地 registry 工具 + 已连接 MCP server 的远程工具（未连接时为空）
+                tools=tool_schemas() + mcp_manager.schemas(),
                 temperature=0.3,
             )
             total_tokens += resp.usage.total_tokens if resp.usage else 0  # 每轮累计真实消耗
@@ -117,9 +120,16 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
                 })
                 continue
 
-            # call_tool 是同步函数，直接 gather 会阻塞事件循环变成串行——
-            # 必须丢进线程池（asyncio.to_thread）才是真并发
-            prep.append({"tc": tc, "coro": asyncio.to_thread(call_tool, tc.function.name, args)})
+            # 路由：mcp__ 前缀走远程 MCP server（本身就是协程）；
+            # 本地同步函数必须 to_thread 丢进线程池，否则 gather 会退化成串行
+            name = tc.function.name
+            # 如果是 MCP 工具，走远程调用
+            if name.startswith(MCP_PREFIX):
+                coro = mcp_manager.call(name, args)
+            # 否则走本地工具，丢进线程池并发执行
+            else:
+                coro = asyncio.to_thread(call_tool, name, args)
+            prep.append({"tc": tc, "coro": coro})
 
         # -------------------------------------------------------------
         # 阶段 2：并发执行

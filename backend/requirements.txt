@@ -4,6 +4,8 @@ uvicorn[standard]
 openai>=1.60,<3
 # 从 .env 文件加载环境变量（API Key 等）
 python-dotenv>=1.0
+# MCP 官方 Python SDK（含 FastMCP）。注意：mcp>=2 已把 FastMCP 改名 MCPServer，API 不兼容，先 pin 在 v1
+mcp>=1.0,<2
 
 # 测试
 pytest

@@ -2,6 +2,7 @@ import json
 # 引入Python的异步库和FastAPI框架   
 import asyncio
 # 引入FastAPI框架  创建 Web API 服务
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 # 引入跨域中间件  允许前端访问后端API
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +18,8 @@ from fastapi import HTTPException
 from services import llm
 # 引入错误分类层：LLMError 用于按类型捕获，translate 用于兜底未知异常
 from services.llm.errors import LLMError, translate
+# 引入 MCP Client：启动时按配置连接 MCP Server，shutdown 时关闭
+from services.mcp import manager as mcp_manager
 
 # 引入智能体模块
 from services.agent import diagnose_workflow, agent_loop
@@ -33,8 +36,16 @@ from services.llm.models import FaultInfo
 # | `from services import llm as l` | `import * as l from './services/llm'` | `l.chat()`            |
 
 
+# MCP server 连接随应用生命周期：启动时连接，关闭时断开
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await mcp_manager.connect_all()
+    yield
+    await mcp_manager.close_all()
+
+
 # 创建FastAPI应用实例，并设置标题为"DevSentinel Backend API"
-app = FastAPI(title="DevSentinel Backend API")
+app = FastAPI(title="DevSentinel Backend API", lifespan=lifespan)
 
 app.add_middleware(
     # 添加跨域中间件  允许前端访问后端API
@@ -85,6 +96,7 @@ async def deepseek_sse_stream(req: ChatRequest):
             "message": f"模拟错误：{req.mock_error}",
             "retryable": True,
         }
+        # 发送错误事件
         yield f"data: {json.dumps(fake_err, ensure_ascii=False)}\n\n"
         # yield "data: [DONE]\n\n"
         # DONE 事件化，保持与前端一致的事件类型
