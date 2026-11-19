@@ -19,6 +19,7 @@ BASE = Path(__file__).parent
 SCENARIO_DIR = BASE.parent / "fault_lab" / "scenarios"
 OUT_DIR = BASE / "runs" / time.strftime("%Y%m%d-%H%M")
 URL = "http://127.0.0.1:8000/api/agent/diagnose_agent"
+APPROVE_URL = "http://127.0.0.1:8000/api/agent/approve"
 
 
 def read_field(path: Path, key: str) -> str:
@@ -37,7 +38,12 @@ def run(path: Path) -> dict:
         r.raise_for_status()
         for line in r.iter_lines():
             if line.startswith("data: "):
-                events.append(json.loads(line[6:]))
+                e = json.loads(line[6:])
+                events.append(e)
+                # eval 无人值守：write/danger 工具触发 HITL 会挂起 SSE → read timeout。
+                # eval 测的是诊断质量不是审批流程，自动放行并在统计里计数。
+                if e.get("type") == "approval_required":
+                    client.post(APPROVE_URL, json={"approval_id": e["approval_id"], "approved": True})
     elapsed = time.time() - t0
 
     (OUT_DIR / f"{path.stem}.jsonl").write_text(
@@ -55,6 +61,7 @@ def run(path: Path) -> dict:
         "tools": [c["name"] for c in calls],
         "tool_errors": sum(results.get(c.get("id"), {}).get("result", "").startswith("[错误]") for c in calls),
         "unpaired": sum(c.get("id") not in results for c in calls),
+        "auto_approved": sum(e["type"] == "approval_required" for e in events),
         "errors": [e for e in events if e["type"] == "error"],
         "done": any(e["type"] == "done" for e in events),
         "seconds": round(elapsed, 1),
@@ -70,7 +77,7 @@ def main() -> None:
         s = run(path)
         summary.append(s)
         print(f"  steps={s['steps']} tools={s['tool_calls']} {s['tools']} "
-              f"errors={len(s['errors'])} {s['seconds']}s", flush=True)
+              f"errors={len(s['errors'])} approved={s['auto_approved']} {s['seconds']}s", flush=True)
     (OUT_DIR / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     build_report(OUT_DIR)
     print(f"\n输出目录: {OUT_DIR}")
@@ -130,7 +137,7 @@ def main() -> None:
         s = run(path)
         summary.append(s)
         print(f"  steps={s['steps']} tools={s['tool_calls']} {s['tools']} "
-              f"errors={len(s['errors'])} {s['seconds']}s", flush=True)
+              f"errors={len(s['errors'])} approved={s['auto_approved']} {s['seconds']}s", flush=True)
     (OUT_DIR / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     build_report(OUT_DIR)
     print(f"\n输出目录: {OUT_DIR}")
