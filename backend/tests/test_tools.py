@@ -131,6 +131,19 @@ class TestSearchCode:
         assert out.startswith("[代码中未命中")
 
 
+class TestReadConfig:
+    def test_lists_config_metadata(self, tmp_path, monkeypatch):
+        (tmp_path / "config.yaml").write_text("a: 1\nb: 2\n", encoding="utf-8")
+        monkeypatch.setattr(tools, "CONFIG_DIR", tmp_path)
+        out = tools.read_config()
+        assert "config.yaml" in out and "大小" in out and "2 行" in out and "最后修改" in out
+
+    def test_rejects_path_and_handles_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tools, "CONFIG_DIR", tmp_path)
+        assert tools.read_config("../secret") .startswith("[错误]")
+        assert tools.read_config("missing.yaml").startswith("[未命中]")
+
+
 class TestGitTools:
     """对真实靶场仓库的冒烟测试（integration）。"""
 
@@ -185,7 +198,7 @@ class TestRiskLevels:
         assert tool_level("draft_ticket") == "write"
 
     def test_known_tools_are_read_level(self):
-        for name in ("read_log", "search_code", "git_log", "git_show", "load_skill"):
+        for name in ("read_log", "search_code", "read_config", "git_log", "git_show", "load_skill"):
             assert tool_level(name) == "read", name
 
     def test_unknown_tool_fails_closed_to_write(self):

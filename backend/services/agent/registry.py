@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 import re
 
 from .skills import load_skill
-from .tools import read_log, search_code, git_log, git_show, draft_ticket
+from .tools import read_log, search_code, read_config, git_log, git_show, draft_ticket
 
 # ---------- 参数模型：描述就是给模型看的工具说明 ----------
 
@@ -64,6 +64,15 @@ class SearchCodeArgs(BaseModel):
             "【匹配规则】采用纯子串匹配（不支持正则表达式），不区分大小写。"
             "【排查建议】若首次搜索无结果，切勿盲目加长表达式，应主动**缩短或精简关键词**（例如将复杂的长函数名拆为核心名词或动作词）后再次尝试。"
         )
+    )
+
+
+class ReadConfigArgs(BaseModel):
+    """read_config 的入参：读取靶场服务配置文件元信息。"""
+    filename: str = Field(
+        default="",
+        description=("配置文件名（如 config.yaml），必须是文件名而非路径；留空列出靶场服务下找到的配置文件。"
+                    "工具只返回文件名、字节大小、行数和最后修改时间，不读取配置内容；未命中时可留空列出全部。")
     )
     max_lines: int = Field(
         default=30,
@@ -158,6 +167,12 @@ class LoadSkillArgs(BaseModel):
 # ---------- 注册表 ----------
 
 TOOL_REGISTRY: dict[str, dict] = {
+    "read_config": {
+        "level": "read",
+        "func": read_config,
+        "args_model": ReadConfigArgs,
+        "description": "查看靶场服务配置文件的文件名、大小、行数和最后修改时间；需要判断配置是否存在或近期是否变更时使用。",
+    },
     "read_log": {
         "level": "read",
         "func": read_log,

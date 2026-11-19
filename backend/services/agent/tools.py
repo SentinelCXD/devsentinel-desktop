@@ -9,6 +9,7 @@ from pathlib import Path
 LAB_DIR = Path(__file__).parent.parent.parent / "fault_lab"
 LOG_DIR = LAB_DIR / "logs"
 CODE_DIR = LAB_DIR / "order-service" / "src"   # 靶场服务源码
+CONFIG_DIR = LAB_DIR / "order-service"         # 靶场服务配置根目录
 
 MAX_LINES = 50       # 输出截断：日志可能几千行，全塞给模型会爆上下文
 MAX_CHARS = 4000     # 字符数兜底：行数没超但单行超长（如整段 JSON）时生效
@@ -234,6 +235,32 @@ def search_code(query: str, max_lines: int = 30) -> str:
     body = "\n\n".join(hits)
     body = _truncate(body.splitlines(), max_lines)
     return f"[代码搜索: {query} | {hit_count} 处命中]\n{body}"
+
+
+def read_config(filename: str = "") -> str:
+    """读取靶场服务配置文件元信息，避免将整份配置注入模型上下文。"""
+    try:
+        allowed = {".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".json", ".env"}
+        if filename and (Path(filename).name != filename or filename in {".", ".."}):
+            return "[错误] 只接受配置文件名，不接受目录或路径"
+        if not CONFIG_DIR.is_dir():
+            return f"[未命中] 配置目录不存在: {CONFIG_DIR}"
+        candidates = sorted(
+            p for p in CONFIG_DIR.rglob("*")
+            if p.is_file() and p.suffix.lower() in allowed
+        )
+        if filename:
+            candidates = [p for p in candidates if p.name == filename]
+        if not candidates:
+            return f"[未命中] 未找到配置文件{': ' + filename if filename else ''}"
+        lines = []
+        for path in candidates:
+            stat = path.stat()
+            count = len(path.read_text(encoding="utf-8").splitlines())
+            lines.append(f"{path.name}: 大小 {stat.st_size} 字节，{count} 行，最后修改 {__import__('datetime').datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec='seconds')}")
+        return _truncate(lines, MAX_LINES)
+    except Exception as exc:
+        return f"[错误] 读取配置元信息失败: {exc}"
 
 
 REPO_DIR = LAB_DIR / "order-service"   # 靶场 git 仓库
