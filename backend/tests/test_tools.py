@@ -185,7 +185,7 @@ class TestRiskLevels:
         assert tool_level("draft_ticket") == "write"
 
     def test_known_tools_are_read_level(self):
-        for name in ("read_log", "search_code", "git_log", "git_show", "load_skill"):
+        for name in ("list_services", "read_log", "search_code", "git_log", "git_show", "load_skill"):
             assert tool_level(name) == "read", name
 
     def test_unknown_tool_fails_closed_to_write(self):
@@ -195,3 +195,21 @@ class TestRiskLevels:
     def test_all_registered_tools_have_level(self):
         for name, spec in TOOL_REGISTRY.items():
             assert spec.get("level") in ("read", "write", "danger"), name
+
+
+class TestListServices:
+    def test_lists_log_services_with_sources(self, log_dir):
+        out = tools.list_services()
+        assert "服务: order-service | 来源: order-service.log" in out
+        assert "服务: other | 来源: other.log" in out
+
+    def test_empty_directory_returns_hint(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tools, "LOG_DIR", tmp_path)
+        assert tools.list_services().startswith("[无日志文件]")
+
+    def test_unreadable_directory_error_is_returned(self, monkeypatch):
+        class BrokenPath:
+            def glob(self, pattern):
+                raise OSError("denied")
+        monkeypatch.setattr(tools, "LOG_DIR", BrokenPath())
+        assert tools.list_services().startswith("[错误]")

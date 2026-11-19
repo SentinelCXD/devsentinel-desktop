@@ -25,6 +25,17 @@ def _truncate(lines: list[str], max_lines: int) -> str:
     return text
 
 
+def list_services() -> str:
+    """列出日志目录中有日志文件的服务，供后续定向排查选择服务名。"""
+    try:
+        paths = sorted(LOG_DIR.glob("*.log"))
+        if not paths:
+            return f"[无日志文件] {LOG_DIR}"
+        return _truncate([f"服务: {p.stem} | 来源: {p.name}" for p in paths], MAX_LINES)
+    except Exception as exc:
+        return f"[错误] 列出服务失败: {exc}"
+
+
 def _meta(name: str, score: int, kw_count: int, start: str, end: str, total: int) -> str:
     """统一的结果头部：来源 + 可选时间窗 + 命中情况。read_log / grep_logs 共用。"""
     parts = [f"来源: {name}"]
