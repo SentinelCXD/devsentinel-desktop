@@ -23,6 +23,8 @@ from services.mcp import manager as mcp_manager
 
 # 引入智能体模块
 from services.agent import diagnose_workflow, agent_loop
+# 人工审批：agent_loop 挂起时的唤醒入口
+from services.agent.loop import resolve_approval
 
 # 引入LLM模型
 from services.llm.models import FaultInfo
@@ -192,6 +194,12 @@ async def diagnose_wf(req: ChatRequest):
 # 手写 Agent 循环：模型自主决定调工具/何时停止，SSE 流式推送每步事件
 @app.post("/api/agent/diagnose_agent")
 async def diagnose_agent(req: ChatRequest):
+    # 审批流联调（mock_error="approval"）：跳过 LLM 的随机性，确定性触发一次
+    # draft_ticket 审批。挂起/唤醒走的是真实机制（create_approval Future +
+    # /api/agent/approve），前端弹窗→决议→observation 回传全链路可测
+    if req.mock_error == "approval":
+        return StreamingResponse(mock_approval_stream(), media_type="text/event-stream")
+
     user_input = next((m["content"] for m in reversed(req.messages) if m.get("role") == "user"), "")
 
     async def gen():
@@ -203,6 +211,57 @@ async def diagnose_agent(req: ChatRequest):
         yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+async def mock_approval_stream():
+    """审批流联调专用：伪造一次 write 级 draft_ticket 调用走完整审批协议。
+
+    事件序列与真实 agent_loop 完全一致：
+    step → tool_call → approval_required（挂起）→ [决议] → tool_result → content → done。
+    批准 → 模拟执行成功的 observation；拒绝/超时 → 与真实拒绝相同的错误 observation。
+    """
+    from services.agent.loop import create_approval, await_approval
+
+    ticket_args = {
+        "title": "【联调】订单服务 503 演练工单",
+        "severity": "high",
+        "root_cause": "联调注入：不消耗 LLM，用于验证审批弹窗→决议→回传链路",
+        "suggested_fix": "在弹窗上点「批准执行」或「拒绝」，观察时间线状态流转",
+    }
+    tc_id = "mock_tc_draft_ticket"
+
+    yield f"data: {json.dumps({'type': 'step', 'name': 'round_1', 'label': '第 1 轮思考'}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'type': 'tool_call', 'name': 'draft_ticket', 'args': json.dumps(ticket_args, ensure_ascii=False), 'id': tc_id}, ensure_ascii=False)}\n\n"
+
+    evt, fut = create_approval("draft_ticket", ticket_args, "write", tool_call_id=tc_id)
+    yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+    approved = await await_approval(fut, evt["approval_id"])
+
+    if approved:
+        result = "[工单已创建] mock_联调工单.md（联调注入，未真正落盘）"
+        text = "[联调] 已批准：draft_ticket 执行成功，observation 已回传。"
+    else:
+        result = "[错误] 工具 draft_ticket（write 级）未获用户批准，已跳过执行。请改用只读工具排查，或基于已有信息直接给结论。"
+        text = "[联调] 已拒绝：错误 observation 已回传，时间线上该工具应显示为失败。"
+
+    yield f"data: {json.dumps({'type': 'tool_result', 'name': 'draft_ticket', 'result': result, 'id': tc_id}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'type': 'content', 'text': text}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+
+
+# 人工审批端点：前端拿到 approval_required 事件后，用户点批准/拒绝调这里。
+# resolve_approval 往挂起的 Future 写结果，agent_loop 随即恢复执行。
+class ApprovalRequest(BaseModel):
+    approval_id: str
+    approved: bool
+
+
+@app.post("/api/agent/approve")
+async def approve(req: ApprovalRequest):
+    if not resolve_approval(req.approval_id, req.approved):
+        # 已处理/不存在/已超时——幂等返回 404，前端不用特殊处理
+        raise HTTPException(status_code=404, detail="approval not found or already resolved")
+    return {"ok": True}
 
 
 if __name__ == "__main__":

@@ -40,6 +40,8 @@ class MCPClientManager:
         self._configs = configs if configs is not None else MCP_SERVERS
         self._conns: dict[str, _ServerConn] = {}
         self._schemas: list[dict] = []
+        # 远程工具权限级别：mcp__{server}__{tool} → read/write/danger
+        self._levels: dict[str, str] = {}
 
     async def connect_all(self) -> None:
         """逐个连接配置的 server：spawn 子进程 → initialize → list_tools 缓存 schema。"""
@@ -76,6 +78,7 @@ class MCPClientManager:
             self._conns[cfg["name"]] = conn
             # MCP_SCHEMA_DEBUG=1 时逐工具打印转换前后 schema，调试用
             for t in conn.tools:
+                remote = remote_tool_name(cfg["name"], t.name)
                 converted = to_openai_tool(cfg["name"], t)
                 if os.environ.get("MCP_SCHEMA_DEBUG"):
                     print(json.dumps({
@@ -84,6 +87,7 @@ class MCPClientManager:
                         "converted": converted,
                     }, ensure_ascii=False))
                 self._schemas.append(converted)
+                self._levels[remote] = _level_of(t)
             log.info("MCP server %s 已连接，%d 个工具", cfg["name"], len(conn.tools))
 
     async def close_all(self) -> None:
@@ -97,10 +101,15 @@ class MCPClientManager:
                 log.warning("MCP server %s 关闭异常: %s", conn.name, e)
         self._conns.clear()
         self._schemas.clear()
+        self._levels.clear()
 
     def schemas(self) -> list[dict]:
         """已连接 server 的 OpenAI tools schema 列表（连接时构建并缓存）。"""
         return list(self._schemas)
+
+    def level(self, remote_name: str) -> str:
+        """远程工具的权限级别；未收录的按 'write' 处理（fail-closed）。"""
+        return self._levels.get(remote_name, "write")
 
     async def call(self, remote_name: str, arguments: dict) -> str:
         """调用远程工具：解析 mcp__ 前缀 → 找连接 → tools/call → 拼文本结果。"""
@@ -119,3 +128,17 @@ class MCPClientManager:
         # isError=True 时内容同样是 observation 文本，照常返回给模型
         texts = [c.text for c in result.content if getattr(c, "text", None)]
         return "\n".join(texts) or "[空结果]"
+
+
+def _level_of(tool) -> str:
+    """从 MCP Tool.annotations 推断权限级别。
+
+    readOnlyHint → read；destructiveHint → danger；其余/无注解 → write。
+    无注解默认 write 是 fail-closed：server 没声明就当它有副作用。
+    """
+    ann = getattr(tool, "annotations", None)
+    if ann is not None and getattr(ann, "readOnlyHint", False):
+        return "read"
+    if ann is not None and getattr(ann, "destructiveHint", False):
+        return "danger"
+    return "write"

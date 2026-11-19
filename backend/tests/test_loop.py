@@ -80,6 +80,9 @@ def wire(monkeypatch):
     )
     monkeypatch.setattr(loop, "client", fake_client)
     monkeypatch.setattr(loop, "call_tool", tools)
+    # 默认全部工具 read 级——审批分支只在测试显式覆盖 level 时才触发，
+    # 否则 unknown 测试工具名会被 fail-closed 成 write 级卡住等审批
+    monkeypatch.setattr(loop, "tool_level", lambda name: "read")
     return llm, tools
 
 
@@ -224,6 +227,39 @@ def test_duplicate_call_short_circuits(wire):
     assert "已用相同参数调用过" in results["d2"]
 
 
+def test_duplicate_call_key_order_still_short_circuits(wire):
+    """键序/空白不同的相同参数也算重复：sig 按语义规范化，不是原始字符串。
+
+    回归：原实现用 arguments 原始字符串拼 sig，{"a":1,"b":2} 和
+    {"b":2,"a":1} 会被当成两个不同调用放行，导致重复执行。
+    """
+    llm, tools = wire
+    llm.script = [
+        _resp(tool_calls=[
+            _tc("k1", "search_code", '{"query": "POOL_MAX", "max_lines": 30}'),
+            _tc("k2", "search_code", '{"max_lines": 30,  "query": "POOL_MAX"}'),
+        ]),
+        _resp(content="ok"),
+    ]
+
+    events = _run(loop.agent_loop("q"))
+
+    assert len(tools.calls) == 1  # 只真执行了一次
+    results = {e["id"]: e["result"] for e in events if e["type"] == "tool_result"}
+    assert results["k1"] == "[ok] search_code"
+    assert "已用相同参数调用过" in results["k2"]
+
+
+def test_call_signature_canonicalizes_json():
+    """_call_signature 契约：语义相同的 JSON 得到相同 sig；非法 JSON 退回原文。"""
+    sig1, args1 = loop._call_signature("t", '{"a": 1, "b": 2}')
+    sig2, args2 = loop._call_signature("t", '{"b": 2,  "a": 1}')
+    assert sig1 == sig2 and args1 == args2
+
+    sig3, args3 = loop._call_signature("t", "{bad json")
+    assert args3 is None and sig3 == "t:{bad json"
+
+
 def test_malformed_json_args_not_executed(wire):
     """arguments 不是合法 JSON：转成错误 observation，不执行工具。"""
     llm, tools = wire
@@ -318,6 +354,9 @@ def test_mcp_prefixed_tool_routes_to_manager(wire, monkeypatch):
         def schemas(self):
             return []
 
+        def level(self, name):
+            return "read"
+
         async def call(self, name, args):
             mcp_calls.append((name, args))
             return "[mcp] ok"
@@ -352,3 +391,136 @@ def test_token_budget_forces_final_without_tools(wire):
     content = next(e for e in events if e["type"] == "content")
     assert content["text"].startswith("[已达 token 预算")
     assert "基于已有信息的结论" in content["text"]
+
+
+# ---------------------------------------------------------------------------
+# 人工审批（HITL）：write/danger 级工具挂起等用户决定
+# ---------------------------------------------------------------------------
+
+async def _collect_with_approval(agen, approve: bool):
+    """消费 agent_loop；遇到 approval_required 事件立刻按 approve 决议。"""
+    events = []
+    async for e in agen:
+        events.append(e)
+        if e["type"] == "approval_required":
+            loop.resolve_approval(e["approval_id"], approve)
+    return events
+
+
+def test_write_tool_requires_approval_and_executes_on_approve(wire, monkeypatch):
+    """write 级工具：先发 approval_required 挂起，批准后才执行。"""
+    llm, tools = wire
+    monkeypatch.setattr(loop, "tool_level", lambda name: "write")
+    llm.script = [
+        _resp(tool_calls=[_tc("w1", "danger_tool", '{"x": 1}')]),
+        _resp(content="done"),
+    ]
+
+    events = asyncio.run(_collect_with_approval(loop.agent_loop("q"), approve=True))
+
+    types = _types(events)
+    assert "approval_required" in types
+    req = next(e for e in events if e["type"] == "approval_required")
+    assert req["name"] == "danger_tool" and req["level"] == "write"
+    assert req["args"] == {"x": 1}
+    # 批准后工具真的执行了
+    assert tools.calls == [{"name": "danger_tool", "args": {"x": 1}}]
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert result["result"] == "[ok] danger_tool"
+
+
+def test_rejected_tool_not_executed_becomes_observation(wire, monkeypatch):
+    """拒绝后：工具不执行，错误 observation 喂回模型，循环继续。"""
+    llm, tools = wire
+    monkeypatch.setattr(loop, "tool_level", lambda name: "danger")
+    llm.script = [
+        _resp(tool_calls=[_tc("d1", "rm_tool", "{}")]),
+        _resp(content="用户拒绝了，我改用只读方式"),
+    ]
+
+    events = asyncio.run(_collect_with_approval(loop.agent_loop("q"), approve=False))
+
+    assert tools.calls == []   # 没执行
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert "未获用户批准" in result["result"]
+    # 拒绝是 observation 不是中断——模型收到了错误文本并给出结论
+    assert events[-1]["type"] == "content"
+
+
+def test_read_tool_never_asks_approval(wire):
+    """read 级工具完全不进审批分支（wire fixture 默认 read）。"""
+    llm, _ = wire
+    llm.script = [
+        _resp(tool_calls=[_tc("r1", "search_code", "{}")]),
+        _resp(content="ok"),
+    ]
+
+    events = _run(loop.agent_loop("q"))
+
+    assert "approval_required" not in _types(events)
+
+
+def test_resolve_approval_unknown_id_returns_false():
+    """重复/不存在的 approval_id：幂等返回 False，不崩。"""
+    assert loop.resolve_approval("nope", True) is False
+
+
+def test_draft_ticket_full_flow(wire, monkeypatch, tmp_path):
+    """集成：真实 draft_ticket（write 级）走完整审批流——
+
+    approval_required 事件 → 用户批准 → 真实执行 → 工单落盘 → 结果回填模型。
+    wire 默认把 call_tool/tool_level 全 mock 掉，这里指回真实 registry。
+    """
+    from services.agent import registry as real_registry
+    from services.agent import tools as real_tools
+
+    llm, _ = wire
+    monkeypatch.setattr(loop, "call_tool", real_registry.call_tool)
+    monkeypatch.setattr(loop, "tool_level", real_registry.tool_level)
+    monkeypatch.setattr(real_tools, "TICKET_DIR", tmp_path / "tickets")
+
+    llm.script = [
+        _resp(tool_calls=[_tc(
+            "t1", "draft_ticket",
+            '{"title": "订单 503", "severity": "high", '
+            '"root_cause": "POOL_MAX=1 (src/db.py:10)", "suggested_fix": "回滚 POOL_MAX"}',
+        )]),
+        _resp(content="工单已建"),
+    ]
+
+    events = asyncio.run(_collect_with_approval(loop.agent_loop("q"), approve=True))
+
+    req = next(e for e in events if e["type"] == "approval_required")
+    assert req["name"] == "draft_ticket" and req["level"] == "write"
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert result["result"].startswith("[工单已创建]")
+    # 真实副作用：文件落盘且内容含入参
+    files = list((tmp_path / "tickets").glob("*.md"))
+    assert len(files) == 1
+    body = files[0].read_text(encoding="utf-8")
+    assert "严重程度: high" in body and "POOL_MAX=1" in body
+
+
+def test_draft_ticket_rejected_no_file(wire, monkeypatch, tmp_path):
+    """拒绝后 draft_ticket 不执行：不落盘，错误 observation 回传。"""
+    from services.agent import registry as real_registry
+    from services.agent import tools as real_tools
+
+    llm, _ = wire
+    monkeypatch.setattr(loop, "call_tool", real_registry.call_tool)
+    monkeypatch.setattr(loop, "tool_level", real_registry.tool_level)
+    monkeypatch.setattr(real_tools, "TICKET_DIR", tmp_path / "tickets")
+
+    llm.script = [
+        _resp(tool_calls=[_tc(
+            "t1", "draft_ticket",
+            '{"title": "t", "severity": "low", "root_cause": "rc", "suggested_fix": "f"}',
+        )]),
+        _resp(content="好的，文字说明"),
+    ]
+
+    events = asyncio.run(_collect_with_approval(loop.agent_loop("q"), approve=False))
+
+    assert not (tmp_path / "tickets").exists()   # 没有任何副作用
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert "未获用户批准" in result["result"]

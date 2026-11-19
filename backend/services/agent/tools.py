@@ -280,3 +280,35 @@ def git_show(commit: str, max_lines: int = 80) -> str:
         return diff
     diff = _truncate(diff.splitlines(), max_lines)
     return f"[git show {commit}]\n{out}\n\n{diff}"
+
+
+TICKET_DIR = LAB_DIR / "tickets"   # 工单草稿落盘目录（write 级工具的副作用）
+
+
+def draft_ticket(title: str, severity: str, root_cause: str, suggested_fix: str) -> str:
+    """起草故障工单：把根因结论整理成 markdown 落盘到 tickets/ 目录。
+
+    write 级工具（有副作用：写文件），Agent 循环会先请求人工审批再执行。
+    返回文件路径 + 工单全文，模型可把路径告诉用户。
+    """
+    from datetime import datetime
+    import re as _re
+
+    try:
+        TICKET_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # 标题转文件名：非安全字符替换成 _，限长防路径爆炸
+        slug = _re.sub(r"[^\w-]+", "_", title).strip("_")[:30] or "ticket"
+        path = TICKET_DIR / f"{ts}_{slug}.md"
+        content = (
+            f"# {title}\n\n"
+            f"- 严重程度: {severity}\n"
+            f"- 创建时间: {datetime.now():%Y-%m-%d %H:%M:%S}\n"
+            f"- 来源: DevSentinel Agent\n\n"
+            f"## 根因分析\n\n{root_cause}\n\n"
+            f"## 修复建议\n\n{suggested_fix}\n"
+        )
+        path.write_text(content, encoding="utf-8")
+    except OSError as e:
+        return f"[错误] 工单写入失败: {e}"
+    return f"[工单已创建] {path.name}（目录 {TICKET_DIR}）\n\n{content}"

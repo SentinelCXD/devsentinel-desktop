@@ -7,6 +7,7 @@
 import pytest
 
 from services.agent import tools
+from services.agent.registry import TOOL_REGISTRY, tool_level
 
 
 @pytest.fixture
@@ -146,3 +147,51 @@ class TestGitTools:
         out = tools.git_show("783f100")
         assert out.startswith("[git show 783f100]")
         assert "POOL_MAX" in out
+
+
+class TestDraftTicket:
+    """write 级工具：写文件副作用 + 错误不抛异常。"""
+
+    def test_writes_markdown_file(self, tmp_path, monkeypatch):
+        d = tmp_path / "tickets"
+        monkeypatch.setattr(tools, "TICKET_DIR", d)
+        out = tools.draft_ticket(
+            title="订单服务 503：连接池耗尽",
+            severity="high",
+            root_cause="src/db.py:14 POOL_MAX=1 导致并发打满",
+            suggested_fix="将 POOL_MAX 提升至 20 并加连接超时",
+        )
+        assert out.startswith("[工单已创建]")
+        files = list(d.glob("*.md"))
+        assert len(files) == 1
+        body = files[0].read_text(encoding="utf-8")
+        assert "严重程度: high" in body
+        assert "POOL_MAX=1" in body
+        assert "连接超时" in body
+
+    def test_write_failure_returns_error_prefix(self, tmp_path, monkeypatch):
+        # 目录被文件占位 → mkdir 失败 → [错误] 前缀，不抛异常
+        blocker = tmp_path / "tickets"
+        blocker.write_text("not a dir", encoding="utf-8")
+        monkeypatch.setattr(tools, "TICKET_DIR", blocker / "sub")
+        out = tools.draft_ticket("t", "low", "rc", "fix")
+        assert out.startswith("[错误]")
+
+
+class TestRiskLevels:
+    """风险分级契约：draft_ticket 是 write 级（触发审批），其余只读工具是 read 级。"""
+
+    def test_draft_ticket_is_write_level(self):
+        assert tool_level("draft_ticket") == "write"
+
+    def test_known_tools_are_read_level(self):
+        for name in ("read_log", "search_code", "git_log", "git_show"):
+            assert tool_level(name) == "read", name
+
+    def test_unknown_tool_fails_closed_to_write(self):
+        # fail-closed：没注册过的工具当有副作用处理，走审批
+        assert tool_level("no_such_tool") == "write"
+
+    def test_all_registered_tools_have_level(self):
+        for name, spec in TOOL_REGISTRY.items():
+            assert spec.get("level") in ("read", "write", "danger"), name

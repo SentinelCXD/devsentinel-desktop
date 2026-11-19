@@ -7,7 +7,8 @@ import DiagnosisCard from './components/DiagnosisCard';
 import FaultCard from './components/FaultCard';
 import OutputPanel from './components/OutputPanel';
 import Timeline from './components/Timeline';
-import { applyEvent, finalizeSteps, isTimelineEvent, type TimelineStep } from './timeline';
+import { applyEvent, finalizeSteps, isTimelineEvent, resolveApproval, type TimelineStep } from './timeline';
+import ApprovalModal, { type ApprovalEvent } from './components/ApprovalModal';
 
 const App: React.FC = () => {
   const [prompt, setPrompt] = useState('');
@@ -34,6 +35,10 @@ const App: React.FC = () => {
 
   // 排查时间线：step / tool_call / tool_result 等过程事件折叠成的步骤列表
   const [steps, setSteps] = useState<TimelineStep[]>([]);
+
+  // 待处理的人工审批：approval_required 事件到达时填上，用户点批准/拒绝后清空。
+  // 后端 agent_loop 此时正挂起等 /api/agent/approve，SSE 流保持打开
+  const [pendingApproval, setPendingApproval] = useState<ApprovalEvent | null>(null);
 
   // 用于取消请求
   const abortRef = useRef<AbortController | null>(null);
@@ -132,6 +137,10 @@ const App: React.FC = () => {
           // 过程事件统一交给时间线 reducer，不再拼进 output / thinking 文本
           if (isTimelineEvent(evt)) {
             setSteps((prev) => applyEvent(prev, evt));
+            // 审批事件额外触发弹窗（时间线里同时把该工具标成"待审批"）
+            if (evt.type === 'approval_required') {
+              setPendingApproval(evt);
+            }
           }
           else if (evt.type === 'reasoning') {
             setThinking((prev) => prev + evt.text);   // 打字机效果靠累积
@@ -172,6 +181,7 @@ const App: React.FC = () => {
     } finally {
       setLoading(false);      // 流式没有 loading 自然结束的时机，在这里兜底
       setSteps(finalizeSteps); // 不管正常结束、出错还是停止，都把没跑完的步骤 / 工具收尾
+      setPendingApproval(null); // 流都结束了，审批框不可能再有结果——后端超时会自动按拒绝处理
     }
   };
 
@@ -209,6 +219,25 @@ const App: React.FC = () => {
   const handleRetry = () => {
     if (history[history.length - 1]?.role === 'user') {
       send(history);
+    }
+  };
+
+  // 人工审批决议：先收掉弹窗和时间线状态（不等网络），再 POST 唤醒后端挂起的 agent_loop。
+  // 批准 → 工具继续执行等 tool_result；拒绝 → 后端把 [错误] observation 回传模型继续排查。
+  // 请求失败不重试不弹错：后端 5 分钟超时会自动按拒绝收尾
+  const handleApproval = async (approved: boolean) => {
+    const approval = pendingApproval;
+    if (!approval) return;
+    setPendingApproval(null);
+    setSteps((prev) => resolveApproval(prev, approval.approval_id, approved));
+    try {
+      await fetch('http://127.0.0.1:8000/api/agent/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approval_id: approval.approval_id, approved }),
+      });
+    } catch {
+      // 网络失败：时间线由后端超时拒绝的 tool_result 自然收尾
     }
   };
 
@@ -307,6 +336,7 @@ const App: React.FC = () => {
             setFaultInfo(null);
             setThinking('');
             setSteps([]);
+            setPendingApproval(null);
           }}
           onStructured={handleStructuredDiagnose}
           onExtract={handleExtractFault}
@@ -330,6 +360,8 @@ const App: React.FC = () => {
           <OutputPanel output={output} loading={loading} streamMode={streamMode} usage={usage} />
         )}
       </main>
+
+      {pendingApproval && <ApprovalModal approval={pendingApproval} onResolve={handleApproval} />}
     </div>
   );
 }

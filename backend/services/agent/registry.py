@@ -8,11 +8,13 @@
 模型侧只看到 tool_schemas() 输出的说明书；执行侧只调 call_tool()。
 新增工具 = 写一个函数 + 一个 Args 模型 + 注册一行。
 """
+from typing import Literal
+
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 import re
 
-from .tools import read_log, search_code, git_log, git_show
+from .tools import read_log, search_code, git_log, git_show, draft_ticket
 
 # ---------- 参数模型：描述就是给模型看的工具说明 ----------
 
@@ -116,10 +118,36 @@ class GitShowArgs(BaseModel):
         return v
 
 
+class DraftTicketArgs(BaseModel):
+    """draft_ticket 的入参：把诊断结论整理成故障工单。"""
+    title: str = Field(
+        description=(
+            "工单标题：一句话概括故障（如 '订单服务 503：连接池耗尽'）。"
+            "标题会作为文件名的一部分，请控制在 30 字以内并避免特殊字符。"
+        )
+    )
+    severity: Literal["low", "medium", "high", "critical"] = Field(
+        description=(
+            "严重程度：low（轻微）/ medium（一般）/ high（严重）/ critical（致命）。"
+            "依据故障影响面和证据的置信度综合判断。"
+        )
+    )
+    root_cause: str = Field(
+        description=(
+            "根因分析正文：必须引用具体证据（日志行、文件:行号、commit hash），"
+            "不要凭空猜测。这是工单的核心内容。"
+        )
+    )
+    suggested_fix: str = Field(
+        description="修复建议：具体可执行的改法（改哪个文件/配置/代码），可含验证步骤。"
+    )
+
+
 # ---------- 注册表 ----------
 
 TOOL_REGISTRY: dict[str, dict] = {
     "read_log": {
+        "level": "read",
         "func": read_log,
         "args_model": ReadLogArgs,
         "description": (
@@ -133,6 +161,7 @@ TOOL_REGISTRY: dict[str, dict] = {
         )
     },
     "search_code": {
+        "level": "read",
         "func": search_code,
         "args_model": SearchCodeArgs,
         "description": (
@@ -145,6 +174,7 @@ TOOL_REGISTRY: dict[str, dict] = {
         )
     },
     "git_log": {
+        "level": "read",
         "func": git_log,
         "args_model": GitLogArgs,
         "description": (
@@ -154,6 +184,7 @@ TOOL_REGISTRY: dict[str, dict] = {
         )
     },
     "git_show": {
+        "level": "read",
         "func": git_show,
         "args_model": GitShowArgs,
         "description": (
@@ -161,6 +192,17 @@ TOOL_REGISTRY: dict[str, dict] = {
             "【使用时机】必须在通过 git_log 拿到提交历史后配合使用。"
             "【核心原则】切忌盲目只看最显眼的第一条提交！当某条提交的 Message（如涉及重构、配置调整或底层逻辑变更）与当前故障现象在语义上相关时，"
             "必须立即调用此工具查看其具体的改动行，锁定嫌疑代码。"
+        )
+    },
+    "draft_ticket": {
+        "level": "write",   # 写文件副作用：执行前必须人工审批（HITL）
+        "func": draft_ticket,
+        "args_model": DraftTicketArgs,
+        "description": (
+            "起草故障工单：把诊断结论整理成 markdown 工单并保存到 tickets/ 目录。"
+            "【使用时机】根因分析完成、证据充分后调用，作为排查的最终产出。"
+            "【注意】此工具为 write 级，执行前需要用户审批；根因分析必须引用具体证据，"
+            "证据不足时先继续排查（read_log / search_code / git_log），不要提前开单。"
         )
     },
 }
@@ -209,3 +251,12 @@ def call_tool(name: str, arguments: dict) -> str:
         return spec["func"](**args.model_dump())
     except Exception as e:
         return f"[错误] 工具执行异常: {type(e).__name__}: {e}"
+
+
+def tool_level(name: str) -> str:
+    """本地工具的权限级别：read / write / danger。
+
+    未知工具返回 'write'（fail-closed：不确定就当有副作用，走审批）。
+    """
+    spec = TOOL_REGISTRY.get(name)
+    return spec.get("level", "write") if spec else "write"

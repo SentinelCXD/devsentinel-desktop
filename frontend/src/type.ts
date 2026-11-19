@@ -62,6 +62,18 @@ export type StreamEvent =
   // Agent 每轮调工具前模型说的话（msg.content），时间线里显示为这一步的思考
   | { type: 'thought'; text: string }
 
+  // 人工审批（HITL）：write/danger 级工具执行前挂起，等用户决定。
+  // 前端收到后弹审批框；用户点批准/拒绝 → POST /api/agent/approve，
+  // 后端 resolve_approval 唤醒 agent_loop：批准则执行，拒绝则错误 observation 回传模型
+  | {
+      type: 'approval_required';
+      approval_id: string;                          // 决议时回传的 id
+      tool_call_id?: string;                        // 配对时间线上的工具项
+      name: string;                                 // 待审批的工具名
+      args: string | Record<string, unknown>;      // 模型给的参数（审批时要看清楚再点）
+      level: 'write' | 'danger';                    // 风险等级
+    }
+
 // 结构化诊断结果：后端 DiagnosisResult 的镜像，前端按字段渲染卡片而不是整段文本
 export interface DiagnosisResult {
   root_cause: string;

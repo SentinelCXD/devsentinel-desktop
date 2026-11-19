@@ -3,6 +3,7 @@ import type { TimelineStep, ToolItem, ToolStatus } from '../timeline';
 
 const TOOL_STATUS: Record<ToolStatus, { dot: string; text: string }> = {
   running: { dot: 'bg-sky-400 animate-pulse', text: '执行中' },
+  awaiting_approval: { dot: 'bg-amber-400 animate-pulse', text: '待审批' },
   done: { dot: 'bg-emerald-500', text: '完成' },
   error: { dot: 'bg-red-500', text: '失败' },
   cancelled: { dot: 'bg-slate-500', text: '已取消' },

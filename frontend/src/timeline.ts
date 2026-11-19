@@ -3,7 +3,7 @@ import type { StreamEvent } from './type';
 // 排查时间线的数据模型：把扁平的 SSE 事件流折叠成「步骤 → 工具调用」两层结构。
 // 和组件分开放：这里是纯函数，不碰 React，方便单测和复用。
 
-export type ToolStatus = 'running' | 'done' | 'error' | 'cancelled';
+export type ToolStatus = 'running' | 'awaiting_approval' | 'done' | 'error' | 'cancelled';
 
 export interface ToolItem {
   id?: string;              // tool_call_id，后端带了就按它配对，没带就按名字兜底
@@ -11,6 +11,7 @@ export interface ToolItem {
   args: string;             // 统一存成字符串，展示时再尝试格式化
   result?: string;
   status: ToolStatus;
+  approvalId?: string;      // 待审批时挂上，用户决议后按它恢复状态
 }
 
 export interface TimelineStep {
@@ -27,11 +28,11 @@ export interface TimelineStep {
 // 只有这几种事件属于时间线，其余（content / reasoning / usage ...）不归它管
 export type TimelineEvent = Extract<
   StreamEvent,
-  { type: 'step' | 'step_result' | 'tool_call' | 'tool_result' | 'thought' }
+  { type: 'step' | 'step_result' | 'tool_call' | 'tool_result' | 'thought' | 'approval_required' }
 >;
 
 export function isTimelineEvent(evt: StreamEvent): evt is TimelineEvent {
-  return ['step', 'step_result', 'tool_call', 'tool_result', 'thought'].includes(evt.type);
+  return ['step', 'step_result', 'tool_call', 'tool_result', 'thought', 'approval_required'].includes(evt.type);
 }
 
 // 工具结果是否算失败：和后端 call_tool 的错误前缀约定保持一致
@@ -68,6 +69,17 @@ export function applyEvent(steps: TimelineStep[], evt: TimelineEvent): TimelineS
         ...s,
         tools: [...s.tools, { id: evt.id, name: evt.name, args: toArgString(evt.args), status: 'running' }],
       }));
+    case 'approval_required':
+      // 审批事件配对到对应的工具项，标成"待审批"并挂上 approvalId。
+      // 配对规则与 tool_result 相同：优先 id，兜底名字 + running
+      return updateLast(ensureStep(steps), (s) => {
+        let idx = evt.tool_call_id ? s.tools.findIndex((t) => t.id === evt.tool_call_id) : -1;
+        if (idx === -1) idx = s.tools.findIndex((t) => t.name === evt.name && t.status === 'running');
+        if (idx === -1) return s;
+        const tools = [...s.tools];
+        tools[idx] = { ...tools[idx], status: 'awaiting_approval', approvalId: evt.approval_id };
+        return { ...s, tools };
+      });
     case 'tool_result':
       return updateLast(ensureStep(steps), (s) => {
         // 配对规则：优先按 id；没有 id 时按先进先出，配给同名且还在 running 的第一个
@@ -82,17 +94,36 @@ export function applyEvent(steps: TimelineStep[], evt: TimelineEvent): TimelineS
   }
 }
 
-// 流结束（正常 / 出错 / 用户停止）时收尾：没跑完的步骤关掉，没回结果的工具标成已取消
+// 用户对审批做出决定后的时间线收尾：
+// 批准 → 恢复执行（running），等 tool_result 落地；
+// 拒绝 → 先标 cancelled，后端会立刻回传 [错误] observation 的 tool_result 把它覆盖成 error
+export function resolveApproval(steps: TimelineStep[], approvalId: string, approved: boolean): TimelineStep[] {
+  return steps.map((s) => ({
+    ...s,
+    tools: s.tools.map((t) =>
+      t.approvalId === approvalId
+        ? { ...t, status: approved ? 'running' : 'cancelled', approvalId: undefined }
+        : t,
+    ),
+  }));
+}
+
+// 流结束（正常 / 出错 / 用户停止）时收尾：没跑完的步骤关掉，没回结果的工具标成已取消。
+// 待审批的也一样——审批框会随流关闭，挂着的 approvalId 不该留到下一次渲染
 export function finalizeSteps(steps: TimelineStep[]): TimelineStep[] {
   const now = Date.now();
   return steps.map((s) =>
-    s.status === 'done' && s.tools.every((t) => t.status !== 'running')
+    s.status === 'done' && s.tools.every((t) => t.status !== 'running' && t.status !== 'awaiting_approval')
       ? s
       : {
           ...s,
           status: 'done',
           endedAt: s.endedAt ?? now,
-          tools: s.tools.map((t) => (t.status === 'running' ? { ...t, status: 'cancelled' } : t)),
+          tools: s.tools.map((t) =>
+            t.status === 'running' || t.status === 'awaiting_approval'
+              ? { ...t, status: 'cancelled', approvalId: undefined }
+              : t,
+          ),
         },
   );
 }

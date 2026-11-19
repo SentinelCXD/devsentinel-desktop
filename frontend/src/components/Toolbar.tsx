@@ -57,6 +57,7 @@ export default function Toolbar(props: {
         className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300"
       >
         <option value="">正常请求</option>
+        <option value="approval">审批流联调</option>
         <option value="auth">模拟 401</option>
         <option value="rate_limit">模拟 429</option>
         <option value="upstream">模拟 5xx</option>

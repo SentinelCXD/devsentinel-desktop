@@ -15,14 +15,18 @@
     npx @modelcontextprotocol/inspector
 """
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from services.agent import tools
 from services.agent.registry import TOOL_REGISTRY
 
 mcp = FastMCP("devsentinel-mcp")
 
+# 4 个工具全是只读诊断工具——标注给 MCP Host 看，client 侧据此做权限分级
+READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 
-@mcp.tool(description=TOOL_REGISTRY["read_log"]["description"])
+
+@mcp.tool(description=TOOL_REGISTRY["read_log"]["description"], annotations=READ_ONLY)
 def read_log(service: str = "", keywords: list[str] | None = None,
              start: str = "", end: str = "", max_lines: int = 50) -> str:
     # keywords 允许 None（Host 可能显式传 null），底层工具只吃 list
@@ -30,17 +34,17 @@ def read_log(service: str = "", keywords: list[str] | None = None,
                           start=start, end=end, max_lines=max_lines)
 
 
-@mcp.tool(description=TOOL_REGISTRY["search_code"]["description"])
+@mcp.tool(description=TOOL_REGISTRY["search_code"]["description"], annotations=READ_ONLY)
 def search_code(query: str, max_lines: int = 30) -> str:
     return tools.search_code(query=query, max_lines=max_lines)
 
 
-@mcp.tool(description=TOOL_REGISTRY["git_log"]["description"])
+@mcp.tool(description=TOOL_REGISTRY["git_log"]["description"], annotations=READ_ONLY)
 def git_log(max_count: int = 10) -> str:
     return tools.git_log(max_count=max_count)
 
 
-@mcp.tool(description=TOOL_REGISTRY["git_show"]["description"])
+@mcp.tool(description=TOOL_REGISTRY["git_show"]["description"], annotations=READ_ONLY)
 def git_show(commit: str, max_lines: int = 80) -> str:
     return tools.git_show(commit=commit, max_lines=max_lines)
 

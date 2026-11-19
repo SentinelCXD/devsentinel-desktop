@@ -1,18 +1,87 @@
 import asyncio
 import json
-from typing import AsyncIterator
+import uuid
+from typing import Any, AsyncIterator
 
 from services.llm.client import client, provider
 from services.mcp import manager as mcp_manager
 from services.mcp.schema import MCP_PREFIX
-from .registry import tool_schemas, call_tool
+from .registry import tool_schemas, call_tool, tool_level
 
 SYSTEM_PROMPT = (
     "你是 DevSentinel 故障排查 Agent。你可以调用工具排查问题："
-    "read_log 查日志证据，search_code 定位代码。"
+    "read_log 查日志证据，search_code 定位代码，git_log/git_show 查近期变更。"
     "证据足够时给出根因分析和修复建议；证据不足时继续调用工具。"
+    "根因明确后，调用 draft_ticket 起草故障工单（该工具需要用户审批，被拒绝时"
+    "直接以文字形式给出根因分析和修复建议即可）。"
     "结论要引用具体证据（日志行、文件:行号），不要凭空猜测。"
 )
+
+# 挂起中的人工审批：approval_id → Future[bool]。
+# agent_loop 遇到 write/danger 级工具时 await 这个 Future 挂起，
+# /api/agent/approve 端点调 resolve_approval 唤醒——SSE 流不结束，
+# 前端在时间线上渲染"待审批"节点，用户点批准/拒绝后循环继续。
+_pending_approvals: dict[str, asyncio.Future] = {}
+
+APPROVAL_TIMEOUT = 300  # 秒；超时视为拒绝，防止用户不操作导致 SSE 永久挂起
+
+
+def resolve_approval(approval_id: str, approved: bool) -> bool:
+    """供 /api/agent/approve 调用：把用户的决定写进 Future 唤醒 agent_loop。"""
+    fut = _pending_approvals.pop(approval_id, None)
+    if fut is None or fut.done():
+        return False
+    fut.set_result(approved)
+    return True
+
+
+def create_approval(name: str, args: dict, level: str, tool_call_id: str | None = None):
+    """注册一个待审批项：返回 (approval_required 事件, 等决议的 Future)。
+
+    agent_loop 和联调注入流（server.py mock_approval）共用同一套
+    挂起/唤醒机制——/api/agent/approve 对两者同样生效。
+    """
+    approval_id = uuid.uuid4().hex[:12]
+    fut = asyncio.get_running_loop().create_future()
+    _pending_approvals[approval_id] = fut
+    evt = {
+        "type": "approval_required",
+        "approval_id": approval_id,
+        "tool_call_id": tool_call_id,   # 前端据此把"待审批"标记配对到时间线上的工具
+        "name": name,
+        "args": args,
+        "level": level,
+    }
+    return evt, fut
+
+
+async def await_approval(fut: asyncio.Future, approval_id: str) -> bool:
+    """挂起等用户决议；超时按拒绝处理（防止 SSE 永久挂起）。
+
+    finally 幂等清理：approve 成功路径已在 resolve_approval 里 pop，
+    超时路径没人清，这里兜底，防 _pending_approvals 泄漏。
+    """
+    try:
+        return await asyncio.wait_for(fut, timeout=APPROVAL_TIMEOUT)
+    except asyncio.TimeoutError:
+        return False
+    finally:
+        _pending_approvals.pop(approval_id, None)
+
+
+def _call_signature(name: str, arguments: str) -> tuple[str, Any]:
+    """生成去重签名 + 解析后的参数。
+
+    返回 (sig, args)：args 为 None 表示 arguments 不是合法 JSON。
+    sig 必须对"语义相同"的调用稳定：先解析再用 sort_keys 重序列化，
+    消除键序/空白等文本差异——否则同一调用换种写法就能绕过去重。
+    无法解析时退回原始字符串（该调用反正会以报错 observation 结束）。
+    """
+    try:
+        args = json.loads(arguments)
+    except json.JSONDecodeError:
+        return f"{name}:{arguments}", None
+    return f"{name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}", args
 
 
 async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
@@ -21,6 +90,7 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
     通过 yield 推送事件：
       step        每轮开始的进度标记
       tool_call   模型决定调用的工具 + 参数
+      approval_required  write/danger 级工具等待人工审批（挂起循环）
       tool_result 工具执行结果
       content     最终答案（模型不再调工具）
       error       异常
@@ -100,7 +170,7 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
                 "id": tc.id,
             }
 
-            sig = f"{tc.function.name}:{tc.function.arguments}"
+            sig, args = _call_signature(tc.function.name, tc.function.arguments)
             if sig in seen:
                 # 重复调用：不执行、不发协程，直接给模型提示
                 # continue 必不可少——否则会落入下方执行分支，同一个 id 回填两条结果
@@ -111,18 +181,40 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
                 continue
             seen.add(sig)
 
-            try:
-                args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
+            if args is None:
                 prep.append({
                     "tc": tc,
                     "result": f"[错误] 工具参数不是合法 JSON: {tc.function.arguments}",
                 })
                 continue
 
+            name = tc.function.name
+            # 权限分级（HITL）：read 直接执行；write/danger 先请求人工审批。
+            # MCP 工具的级别来自 server 的 annotations（client.py connect 时提取），
+            # 本地工具来自 TOOL_REGISTRY 的 level 字段；查不到按 write 处理（fail-closed）。
+            level = (
+                mcp_manager.level(name)
+                if name.startswith(MCP_PREFIX)
+                else tool_level(name)
+            )
+            if level != "read":
+                evt, fut = create_approval(name, args, level, tool_call_id=tc.id)
+                yield evt
+                # 挂起整个 agent_loop：SSE 流保持打开，等前端 approve 端点唤醒
+                approved = await await_approval(fut, evt["approval_id"])
+                if not approved:
+                    # 拒绝/超时不是中断——和错误同理，是 observation 喂回模型
+                    prep.append({
+                        "tc": tc,
+                        "result": (
+                            f"[错误] 工具 {name}（{level} 级）未获用户批准，已跳过执行。"
+                            "请改用只读工具排查，或基于已有信息直接给结论。"
+                        ),
+                    })
+                    continue
+
             # 路由：mcp__ 前缀走远程 MCP server（本身就是协程）；
             # 本地同步函数必须 to_thread 丢进线程池，否则 gather 会退化成串行
-            name = tc.function.name
             # 如果是 MCP 工具，走远程调用
             if name.startswith(MCP_PREFIX):
                 coro = mcp_manager.call(name, args)
