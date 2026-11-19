@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 import re
 
+from .skills import load_skill
 from .tools import read_log, search_code, git_log, git_show, draft_ticket
 
 # ---------- 参数模型：描述就是给模型看的工具说明 ----------
@@ -143,6 +144,17 @@ class DraftTicketArgs(BaseModel):
     )
 
 
+class LoadSkillArgs(BaseModel):
+    """load_skill 的入参：取一本排查手册的全文。"""
+    name: str = Field(
+        description=(
+            "手册名称，必须从系统提示的「可用排查手册」清单中原样选择"
+            "（如 'mysql-troubleshooting'），不支持模糊匹配。"
+            "清单里没有与故障相关的手册时不要调用本工具。"
+        )
+    )
+
+
 # ---------- 注册表 ----------
 
 TOOL_REGISTRY: dict[str, dict] = {
@@ -192,6 +204,18 @@ TOOL_REGISTRY: dict[str, dict] = {
             "【使用时机】必须在通过 git_log 拿到提交历史后配合使用。"
             "【核心原则】切忌盲目只看最显眼的第一条提交！当某条提交的 Message（如涉及重构、配置调整或底层逻辑变更）与当前故障现象在语义上相关时，"
             "必须立即调用此工具查看其具体的改动行，锁定嫌疑代码。"
+        )
+    },
+    "load_skill": {
+        "level": "read",
+        "func": load_skill,
+        "args_model": LoadSkillArgs,
+        "description": (
+            "获取指定排查手册的全文。系统提示里只列了手册名称和一句话描述，"
+            "需要系统性排查步骤/命令参考时用本工具加载对应手册。"
+            "【使用时机】故障症状与某本手册的描述相关（如数据库连接池、K8s Pod 异常），"
+            "或常规排查卡壳需要方法论时。"
+            "【注意】手册是参考资料，最终结论仍必须引用日志/代码证据，不能只凭手册下判断。"
         )
     },
     "draft_ticket": {

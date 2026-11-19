@@ -7,8 +7,9 @@ from services.llm.client import client, provider
 from services.mcp import manager as mcp_manager
 from services.mcp.schema import MCP_PREFIX
 from .registry import tool_schemas, call_tool, tool_level
+from .skills import skill_index
 
-SYSTEM_PROMPT = (
+BASE_PROMPT = (
     "你是 DevSentinel 故障排查 Agent。你可以调用工具排查问题："
     "read_log 查日志证据，search_code 定位代码，git_log/git_show 查近期变更。"
     "证据足够时给出根因分析和修复建议；证据不足时继续调用工具。"
@@ -16,6 +17,17 @@ SYSTEM_PROMPT = (
     "直接以文字形式给出根因分析和修复建议即可）。"
     "结论要引用具体证据（日志行、文件:行号），不要凭空猜测。"
 )
+
+
+def build_system_prompt() -> str:
+    """基础指令 + 手册索引（Skill 渐进式加载）。
+
+    索引只含名称和描述（skill_index 的约定），全文由模型调 load_skill
+    按需注入——手册正文不进 system prompt，省上下文。
+    每次请求重建：改手册文件不用重启服务。
+    """
+    index = skill_index()
+    return f"{BASE_PROMPT}\n{index}" if index else BASE_PROMPT
 
 # 挂起中的人工审批：approval_id → Future[bool]。
 # agent_loop 遇到 write/danger 级工具时 await 这个 Future 挂起，
@@ -96,7 +108,7 @@ async def agent_loop(question: str, max_steps: int = 10) -> AsyncIterator[dict]:
       error       异常
     """
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": build_system_prompt()},
         {"role": "user", "content": question},
     ]
     fail_count: dict[str, int] = {}   # 工具失败次数统计

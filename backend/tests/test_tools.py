@@ -185,7 +185,7 @@ class TestRiskLevels:
         assert tool_level("draft_ticket") == "write"
 
     def test_known_tools_are_read_level(self):
-        for name in ("read_log", "search_code", "git_log", "git_show"):
+        for name in ("read_log", "search_code", "git_log", "git_show", "load_skill"):
             assert tool_level(name) == "read", name
 
     def test_unknown_tool_fails_closed_to_write(self):
