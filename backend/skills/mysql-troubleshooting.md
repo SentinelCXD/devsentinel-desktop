@@ -30,7 +30,7 @@ description: MySQL 故障排查手册：连接池耗尽、慢查询、死锁与�
 症状：特定接口变慢；慢查询日志增长；`Threads_running` 偏高。
 
 定位：
-1. `SHOW FULL PROCESSLIST;` 看当前在跑什么，State 列找 Sending data / Waiting for lock
+1. `SHOW FULL PROCESSLIST;` 看当前在跑什么，State 列找耗时状态（如 Sending data / Waiting for lock；状态名随 MySQL 版本不同，以实际输出为准）
 2. 开慢日志：`SET GLOBAL slow_query_log = ON;` + `long_query_time`
 3. `EXPLAIN` 可疑 SQL，重点看 type=ALL（全表扫描）、rows 估算、缺索引
 

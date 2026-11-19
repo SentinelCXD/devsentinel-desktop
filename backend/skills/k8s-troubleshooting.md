@@ -52,7 +52,7 @@ Exit Code 137。
 - `kubectl get pods -o wide`：整体状态 + 所在节点
 - `kubectl describe pod <pod>`：Events + 探针配置 + 重启计数
 - `kubectl logs <pod> [--previous] [-f]`：应用输出
-- `kubectl top pod`：当前资源用量（对比 limit）
+- `kubectl top pod`：当前资源用量（对比 limit；需集群安装 metrics-server，裸集群会报 `Metrics API not available`）
 - `kubectl get events --sort-by=.lastTimestamp`：按时间看全局事件
 
 ## 6. 用 DevSentinel 工具怎么查
