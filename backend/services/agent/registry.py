@@ -15,9 +15,12 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 import re
 
 from .skills import load_skill
-from .tools import read_log, search_code, git_log, git_show, draft_ticket
+from .tools import list_services, read_log, search_code, git_log, git_show, draft_ticket
 
 # ---------- 参数模型：描述就是给模型看的工具说明 ----------
+
+class ListServicesArgs(BaseModel):
+    """list_services 的入参：无需参数，直接调用即返回全部服务清单。"""
 
 class ReadLogArgs(BaseModel):
     """read_log 的入参：按服务/时间窗/关键词过滤日志。"""
@@ -158,6 +161,17 @@ class LoadSkillArgs(BaseModel):
 # ---------- 注册表 ----------
 
 TOOL_REGISTRY: dict[str, dict] = {
+    "list_services": {
+        "level": "read",
+        "func": list_services,
+        "args_model": ListServicesArgs,
+        "description": (
+            "列出靶场内所有服务及其日志文件清单（服务名、文件名、大小、行数），无需参数。"
+            "【使用时机】排查开始时先调用，了解有哪些服务可查、各日志规模如何，再决定检索策略。"
+            "【衔接策略】返回的服务名可直接作为 read_log 的 service 参数；"
+            "不确定故障属于哪个服务时，省略 service 做全局搜索，不要凭空编造服务名。"
+        )
+    },
     "read_log": {
         "level": "read",
         "func": read_log,

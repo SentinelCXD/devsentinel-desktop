@@ -6,7 +6,7 @@
 两个设计决策：
 1. 工具描述直接复用 registry.py 的 TOOL_REGISTRY——描述是打磨过的 prompt 资产，
    只维护一份，MCP 侧不另写，以后改描述不碰这里。
-2. 只暴露 Agent 注册的 4 个工具；grep_logs 不暴露——它与 read_log 功能重叠
+2. 只暴露 Agent 注册的 5 个工具；grep_logs 不暴露——它与 read_log 功能重叠
    （workflow 遗留），暴露重叠工具会让调用方困惑，暴露哪些工具是接口设计决策。
 
 运行（stdio，由 Host 拉起子进程，不手动前台跑）：
@@ -22,8 +22,14 @@ from services.agent.registry import TOOL_REGISTRY
 
 mcp = FastMCP("devsentinel-mcp")
 
-# 4 个工具全是只读诊断工具——标注给 MCP Host 看，client 侧据此做权限分级
+# 5 个工具全是只读诊断工具——标注给 MCP Host 看，client 侧据此做权限分级
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
+
+
+@mcp.tool(description=TOOL_REGISTRY["list_services"]["description"], annotations=READ_ONLY)
+def list_services() -> str:
+    # read_log 的 service 命名空间入口：Host 先拿清单再查具体服务
+    return tools.list_services()
 
 
 @mcp.tool(description=TOOL_REGISTRY["read_log"]["description"], annotations=READ_ONLY)

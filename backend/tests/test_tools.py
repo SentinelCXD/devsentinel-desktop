@@ -7,7 +7,7 @@
 import pytest
 
 from services.agent import tools
-from services.agent.registry import TOOL_REGISTRY, tool_level
+from services.agent.registry import TOOL_REGISTRY, call_tool, tool_level
 
 
 @pytest.fixture
@@ -72,6 +72,51 @@ class TestSearch:
         snippet, _ = tools._search(lines, ["hit"], 10)
         assert "[已截断" in snippet
         assert snippet.count("hit") == 10
+
+
+class TestListServices:
+    def test_lists_all_services_with_stats(self, log_dir):
+        out = tools.list_services()
+        assert out.startswith("[靶场服务清单")
+        assert "共 2 个服务" in out
+        # fixture：order-service.log 4 行、other.log 1 行
+        assert "order-service | order-service.log" in out
+        assert "4 行" in out
+        assert "other | other.log" in out
+        assert "1 行" in out
+
+    def test_row_contains_file_size(self, log_dir):
+        out = tools.list_services()
+        size = (log_dir / "other.log").stat().st_size
+        assert f"{size} B" in out
+
+    def test_missing_dir_returns_hint(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tools, "LOG_DIR", tmp_path / "nope")
+        out = tools.list_services()
+        assert out.startswith("[无日志目录]")
+
+    def test_empty_dir_returns_hint(self, tmp_path, monkeypatch):
+        d = tmp_path / "logs"
+        d.mkdir()
+        monkeypatch.setattr(tools, "LOG_DIR", d)
+        out = tools.list_services()
+        assert out.startswith("[无日志文件]")
+
+    def test_unreadable_file_degrades_per_row(self, tmp_path, monkeypatch):
+        # b.log 是目录：该行标注读取失败，其余服务照常列出
+        d = tmp_path / "logs"
+        d.mkdir()
+        (d / "a.log").write_text("l1\nl2\n", encoding="utf-8")
+        (d / "b.log").mkdir()
+        monkeypatch.setattr(tools, "LOG_DIR", d)
+        out = tools.list_services()
+        assert "a.log" in out and "2 行" in out
+        assert "b.log | 读取失败" in out
+
+    def test_call_tool_dispatch_no_args(self, log_dir):
+        # 零参数工具：空 JSON 也能走 call_tool 分发
+        out = call_tool("list_services", {})
+        assert out.startswith("[靶场服务清单")
 
 
 class TestReadLog:
@@ -185,7 +230,7 @@ class TestRiskLevels:
         assert tool_level("draft_ticket") == "write"
 
     def test_known_tools_are_read_level(self):
-        for name in ("read_log", "search_code", "git_log", "git_show", "load_skill"):
+        for name in ("list_services", "read_log", "search_code", "git_log", "git_show", "load_skill"):
             assert tool_level(name) == "read", name
 
     def test_unknown_tool_fails_closed_to_write(self):

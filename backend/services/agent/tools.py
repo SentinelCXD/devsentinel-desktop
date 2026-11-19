@@ -58,6 +58,32 @@ def _search(lines: list[str], kw: list[str], max_lines: int) -> tuple[str, int] 
     return _truncate([lines[i] for i in ordered], max_lines), len(matched)
 
 
+def list_services() -> str:
+    """列出靶场里所有服务及其日志文件（服务名、文件名、大小、行数）。
+
+    排查的"地图"：read_log 的 service 只认日志文件名去掉 .log 的服务名，
+    先看清单再选目标，避免盲猜服务名踩 [无日志文件]。
+    单个文件读取失败只标注该行，不拖垮整张清单——清单本身就是降级手段。
+    """
+    if not LOG_DIR.is_dir():
+        return f"[无日志目录] {LOG_DIR}"
+    files = sorted(LOG_DIR.glob("*.log"))
+    if not files:
+        return f"[无日志文件] {LOG_DIR}"
+
+    rows = ["服务名 | 文件名 | 大小 | 行数"]
+    for p in files:
+        try:
+            size = p.stat().st_size
+            n_lines = len(p.read_text(encoding="utf-8").splitlines())
+        except (OSError, UnicodeDecodeError):
+            rows.append(f"{p.stem} | {p.name} | 读取失败 | -")
+            continue
+        rows.append(f"{p.stem} | {p.name} | {size} B | {n_lines} 行")
+    header = f"[靶场服务清单 | 共 {len(files)} 个服务 | service 名用于 read_log]"
+    return _truncate([header] + rows, MAX_LINES)
+
+
 def grep_logs(service: str, keywords: list[str], max_lines: int = MAX_LINES) -> str:
     """按服务名 + 关键词过滤日志。
 

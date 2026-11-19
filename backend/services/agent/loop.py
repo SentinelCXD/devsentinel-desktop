@@ -11,7 +11,8 @@ from .skills import skill_index
 
 BASE_PROMPT = (
     "你是 DevSentinel 故障排查 Agent。你可以调用工具排查问题："
-    "read_log 查日志证据，search_code 定位代码，git_log/git_show 查近期变更。"
+    "list_services 列出有哪些服务可查，read_log 查日志证据，"
+    "search_code 定位代码，git_log/git_show 查近期变更。"
     "证据足够时给出根因分析和修复建议；证据不足时继续调用工具。"
     "根因明确后，调用 draft_ticket 起草故障工单（该工具需要用户审批，被拒绝时"
     "直接以文字形式给出根因分析和修复建议即可）。"
