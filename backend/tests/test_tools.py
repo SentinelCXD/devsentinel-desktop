@@ -119,6 +119,22 @@ class TestReadLog:
         assert "其他命中文件" not in out
 
 
+class TestTailErrors:
+    def test_counts_all_errors_and_returns_last_three_with_line_numbers(self, log_dir):
+        out = tools.tail_errors()
+        assert "服务: order-service | 错误数: 2" in out
+        assert "order-service.log:3:" in out
+        assert "order-service.log:2:" in out
+        assert "服务: other | 错误数: 0" in out
+
+    def test_dispatch_and_no_logs(self, tmp_path, monkeypatch):
+        from services.agent.registry import call_tool
+        d = tmp_path / "empty"
+        d.mkdir()
+        monkeypatch.setattr(tools, "LOG_DIR", d)
+        assert call_tool("tail_errors", {"service": "", "keywords": [], "start": "", "end": "", "max_lines": 50}).startswith("[无日志文件]")
+
+
 class TestSearchCode:
     def test_hit_format_file_line(self, code_dir):
         out = tools.search_code("POOL_MAX")
@@ -185,7 +201,7 @@ class TestRiskLevels:
         assert tool_level("draft_ticket") == "write"
 
     def test_known_tools_are_read_level(self):
-        for name in ("read_log", "search_code", "git_log", "git_show", "load_skill"):
+        for name in ("read_log", "search_code", "git_log", "git_show", "load_skill", "tail_errors"):
             assert tool_level(name) == "read", name
 
     def test_unknown_tool_fails_closed_to_write(self):

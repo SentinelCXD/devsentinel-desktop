@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 import re
 
 from .skills import load_skill
-from .tools import read_log, search_code, git_log, git_show, draft_ticket
+from .tools import read_log, search_code, git_log, git_show, draft_ticket, tail_errors
 
 # ---------- 参数模型：描述就是给模型看的工具说明 ----------
 
@@ -30,6 +30,11 @@ class ReadLogArgs(BaseModel):
             "无法确定、需要全局排查或未找到证据时，留空搜索全部日志文件。"
         )
     )
+
+
+class TailErrorsArgs(BaseModel):
+    """tail_errors 无参数：扫描日志目录内全部服务日志。"""
+    pass
     keywords: list[str] = Field(
         default_factory=list,
         description=(
@@ -158,6 +163,15 @@ class LoadSkillArgs(BaseModel):
 # ---------- 注册表 ----------
 
 TOOL_REGISTRY: dict[str, dict] = {
+    "tail_errors": {
+        "level": "read",
+        "func": tail_errors,
+        "args_model": TailErrorsArgs,
+        "description": (
+            "汇总靶场所有服务日志中的错误行数，并返回每个服务最近三条错误示例及文件行号。"
+            "【使用时机】需要先比较各服务错误规模或全局查看近期错误时调用；无日志文件时改用 read_log 检查日志目录/范围。"
+        )
+    },
     "read_log": {
         "level": "read",
         "func": read_log,

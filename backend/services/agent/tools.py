@@ -184,6 +184,26 @@ def read_log(service: str = "",
             out += f"\n[其他命中文件: {names}]"
     return out
 
+
+def tail_errors(service: str = "", keywords: list[str] | None = None, start: str = "", end: str = "", max_lines: int = MAX_LINES) -> str:
+    """统计每个服务日志中的错误行，并展示各服务最近三条错误证据。"""
+    try:
+        files = sorted(LOG_DIR.glob("*.log"))
+        if not files:
+            return f"[无日志文件] {LOG_DIR}"
+        out: list[str] = []
+        for path in files:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            errors = [(i, line) for i, line in enumerate(lines, 1) if "error" in line.lower()]
+            if errors:
+                out.append(f"服务: {path.stem} | 错误数: {len(errors)}")
+                out.extend(f"{path.name}:{i}: {line}" for i, line in errors[-3:])
+            else:
+                out.append(f"服务: {path.stem} | 错误数: 0 | 示例: 无")
+        return _truncate(out, MAX_LINES)
+    except Exception as e:
+        return f"[错误] 扫描日志失败: {e}"
+
 CODE_CONTEXT_LINES = 3  # 代码命中行前后各带 3 行（比日志多，代码要上下文才能看懂）
 
 
