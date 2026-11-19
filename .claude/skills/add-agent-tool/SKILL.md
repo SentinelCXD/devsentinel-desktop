@@ -42,6 +42,9 @@ description: 给 DevSentinel Agent 新增一个工具时使用。覆盖完整标
   防呆规则（如"必须从 git_log 结果中取 hash，不支持 HEAD~1"）、
   未命中/失败时的降级策略
 - 枚举值用 `Literal`
+- **Args 字段必须与函数签名表达同一意图**：模型按 schema 逐字段传参，
+  字段存在 = 承诺功能存在；函数用不到的字段一个都不许留（死参数 = 对模型撒谎，
+  比报错更糟）。无参工具就写空模型，别抄现有模型当模板
 - 注册进 `TOOL_REGISTRY`：`level` / `func` / `args_model` / `description`
   （description 写使用时机和与其他工具的衔接，别复述参数）
 
@@ -55,7 +58,8 @@ description: 给 DevSentinel Agent 新增一个工具时使用。覆盖完整标
 3. 边界：空输入、超长输出截断标记、不存在的外部资源
 4. **分发路径：必须写一个 `call_tool("<tool>", {...})` 冒烟测试**——
    直调函数测不出 Args 模型与函数签名不兼容（如 Args 误吸了其他类的字段），
-   而 call_tool 是模型实际使用工具的唯一路径；分发断了 = 工具注册成功但模型永远用不了
+   而 call_tool 是模型实际使用工具的唯一路径；分发断了 = 工具注册成功但模型永远用不了。
+   此测试报红时，**修复方向是删 Args 多余字段，不是给函数加用不到的参数**
 5. 权限：加进 `TestRiskLevels.test_known_tools_are_read_level`
    （write 级则参照 draft_ticket 的写法断言）
 
