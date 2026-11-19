@@ -53,7 +53,10 @@ description: 给 DevSentinel Agent 新增一个工具时使用。覆盖完整标
 1. 正常路径：输出含证据要素（来源/行号/命中数）
 2. 错误路径返回 `[错误]` 前缀且**不抛异常**（用非法参数直接调函数）
 3. 边界：空输入、超长输出截断标记、不存在的外部资源
-4. 权限：加进 `TestRiskLevels.test_known_tools_are_read_level`
+4. **分发路径：必须写一个 `call_tool("<tool>", {...})` 冒烟测试**——
+   直调函数测不出 Args 模型与函数签名不兼容（如 Args 误吸了其他类的字段），
+   而 call_tool 是模型实际使用工具的唯一路径；分发断了 = 工具注册成功但模型永远用不了
+5. 权限：加进 `TestRiskLevels.test_known_tools_are_read_level`
    （write 级则参照 draft_ticket 的写法断言）
 
 ## 第 5 步：MCP 暴露决策
@@ -78,7 +81,7 @@ cd backend && .venv/bin/python -m pytest -q        # 必须全绿
 - [ ] 函数契约：str 返回 / 不抛异常 / 错误前缀 / _truncate
 - [ ] Args 的 description 写了限制与降级策略
 - [ ] TOOL_REGISTRY 注册且 level 正确
-- [ ] 测试覆盖正常/错误/边界 + 权限级别
+- [ ] 测试覆盖正常/错误/边界 + **call_tool 分发冒烟** + 权限级别
 - [ ] pytest 全绿
 - [ ] MCP 暴露与否是主动决策（不是忘了）
 - [ ] 新工具必须让模型能发现它：system prompt 工具清单 / TOOL_REGISTRY
